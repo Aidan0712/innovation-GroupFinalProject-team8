@@ -1,96 +1,70 @@
-import { defineStore } from 'pinia'
+﻿import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 
 type ThemeType = 'light' | 'dark'
 
-/**
- * 应用全局状态管理
- */
+function getInitialTheme(): ThemeType {
+  localStorage.setItem('app-theme', 'light')
+  return 'light'
+}
+
 export const useAppStore = defineStore('app', () => {
-  // ========== State ==========
-
-  /** 侧边栏是否折叠 */
   const sidebarCollapsed = ref(false)
-
-  /** 主题：light | dark */
-  const theme = ref<ThemeType>(
-    (localStorage.getItem('app-theme') as ThemeType) || 'light'
-  )
-
-  /** 全局加载状态 */
+  const theme = ref<ThemeType>(getInitialTheme())
   const globalLoading = ref(false)
-
-  /** 全局加载文本 */
   const loadingText = ref('加载中...')
 
-  // ========== Getters ==========
-
-  /** 是否为暗色主题 */
   const isDark = computed(() => theme.value === 'dark')
 
-  // ========== Actions ==========
-
-  /**
-   * 切换侧边栏折叠
-   */
   function toggleSidebar() {
     sidebarCollapsed.value = !sidebarCollapsed.value
   }
 
-  /**
-   * 设置侧边栏折叠状态
-   */
   function setSidebarCollapsed(collapsed: boolean) {
     sidebarCollapsed.value = collapsed
   }
 
-  /**
-   * 切换主题
-   */
   function toggleTheme() {
-    theme.value = theme.value === 'light' ? 'dark' : 'light'
+    theme.value = 'light'
   }
 
-  /**
-   * 设置主题
-   */
-  function setTheme(t: ThemeType) {
-    theme.value = t
+  function setTheme(_t: ThemeType) {
+    theme.value = 'light'
   }
 
-  /**
-   * 显示全局加载
-   */
   function showLoading(text?: string) {
     globalLoading.value = true
     if (text) loadingText.value = text
   }
 
-  /**
-   * 隐藏全局加载
-   */
   function hideLoading() {
     globalLoading.value = false
     loadingText.value = '加载中...'
   }
 
-  // ========== 副作用 ==========
+  watch(theme, () => {
+    const nextTheme = 'light'
+    const isDarkTheme = false
 
-  // 监听主题变化，同步到 DOM 和 localStorage
-  watch(theme, (val) => {
-    document.documentElement.setAttribute('data-theme', val)
-    localStorage.setItem('app-theme', val)
+    document.documentElement.setAttribute('data-theme', nextTheme)
+    document.documentElement.classList.toggle('theme-dark', isDarkTheme)
+    document.documentElement.classList.toggle('theme-light', !isDarkTheme)
+    document.documentElement.classList.toggle('dark', isDarkTheme)
+    document.body.classList.toggle('theme-dark', isDarkTheme)
+    document.body.classList.toggle('theme-light', !isDarkTheme)
+    document.body.classList.toggle('dark', isDarkTheme)
+    localStorage.setItem('app-theme', nextTheme)
+    setTimeout(() => {
+      ;(window as any).__APP_DEBUG_CHECK__?.(`theme-store:${nextTheme}`)
+    }, 120)
   }, { immediate: true })
 
   return {
-    // State
     sidebarCollapsed,
     theme,
     globalLoading,
     loadingText,
-    // Getters
     isDark,
-    // Actions
     toggleSidebar,
     setSidebarCollapsed,
     toggleTheme,

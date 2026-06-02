@@ -1,7 +1,13 @@
 # Environment files with secrets
 .env
 .env.*
+*.env
+*.env.*
 !.env.example
+env/
+venv/
+.venv/
+.conda/
 backend/.env
 frontend/.env
 frontend/.env.*
@@ -16,6 +22,8 @@ backend/venv/
 backend/.venv/
 backend/chroma_db/
 backend/uploads/
+chroma_db/
+uploads/
 *.db
 *.sqlite
 *.sqlite3
@@ -31,7 +39,22 @@ dist/
 huggingface_cache/
 .cache/
 logs/
+artifacts/
+tmp_*_render/
+tmp-edge-profile*/
+tmp-edge-dom.html
 *.log
+
+# Office temporary files
+~$*.docx
+*.wbk
+
+# Competition packaging artifacts excluded from source submission
+传智杯项目/
+传智杯项目.zip
+传智杯ai大模型视频讲解.mp4
+作品介绍文档.docx
+示例/*.mp4
 
 # IDE / OS
 .idea/

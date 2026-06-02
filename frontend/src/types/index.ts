@@ -286,6 +286,16 @@ export interface FileUploadResponse {
   file_size: number
 }
 
+/** 会话产物 */
+export interface ChatArtifact {
+  name: string
+  size: number
+  type: string
+  created_at: number
+  preview_url: string
+  download_url: string
+}
+
 /** 上传进度 */
 export interface UploadProgress {
   loaded: number
@@ -304,6 +314,14 @@ export interface UserProfile {
   major?: string
   grade?: string
   university?: string
+  education_level?: string
+  degree?: string
+  graduation_year?: string
+  target_position?: string
+  target_city?: string
+  skills?: string
+  certificates?: string
+  internship_experience?: string
   allow_ai_use: boolean
   created_at: string
   updated_at: string
@@ -327,6 +345,14 @@ export interface ProfileUpdateParams {
   major?: string
   grade?: string
   university?: string
+  education_level?: string
+  degree?: string
+  graduation_year?: string
+  target_position?: string
+  target_city?: string
+  skills?: string
+  certificates?: string
+  internship_experience?: string
 }
 
 /** 修改密码参数 */

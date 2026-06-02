@@ -3,6 +3,7 @@ import type {
   Conversation,
   Message,
   ChatMessage,
+  ChatArtifact,
   APIResponse,
 } from '@/types'
 
@@ -67,4 +68,23 @@ export function deleteConversationApi(
   conversationId: number | string
 ): Promise<APIResponse<null>> {
   return request.delete(`/v1/chat/conversations/${conversationId}`)
+}
+
+/**
+ * 获取会话产物列表
+ */
+export function getArtifactsApi(
+  conversationId: number | string
+): Promise<APIResponse<ChatArtifact[]>> {
+  return request.get(`/v1/chat/conversations/${conversationId}/artifacts`)
+}
+
+/**
+ * 预览会话产物
+ */
+export function previewArtifactApi(
+  conversationId: number | string,
+  filename: string
+): Promise<string> {
+  return request.get(`/v1/chat/conversations/${conversationId}/artifacts/${encodeURIComponent(filename)}/preview`)
 }

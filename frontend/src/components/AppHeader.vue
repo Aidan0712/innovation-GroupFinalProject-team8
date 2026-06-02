@@ -1,70 +1,63 @@
-<script setup lang="ts">
-import { ref, watch } from 'vue'
+﻿<script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useAuthStore } from '@/stores/auth'
-import { useAppStore } from '@/stores/app'
 import { ElMessageBox } from 'element-plus'
-
-/**
- * 顶部导航栏
- * 左侧：应用标题，右侧：用户头像、主题切换、退出
- */
+import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
 const authStore = useAuthStore()
-const appStore = useAppStore()
-
-/**
- * 头像缓存破坏时间戳（响应式，确保 el-avatar 重新渲染）
- */
 const avatarTimestamp = ref(Date.now())
+const userMenuVisible = ref(false)
 
 watch(
   () => authStore.user?.avatar_url,
-  () => { avatarTimestamp.value = Date.now() }
+  () => {
+    avatarTimestamp.value = Date.now()
+  }
 )
 
-/**
- * 头像 URL（拼接时间戳破坏浏览器缓存）
- */
 function getAvatarUrl(): string {
   const url = authStore.currentUser?.avatar_url
   if (!url) return ''
   return url.includes('?') ? `${url}&t=${avatarTimestamp.value}` : `${url}?t=${avatarTimestamp.value}`
 }
 
-/**
- * 切换主题
- */
-function handleToggleTheme() {
-  appStore.toggleTheme()
-}
-
-/**
- * 跳转个人中心
- */
 function goToProfile() {
+  userMenuVisible.value = false
   router.push('/profile')
 }
 
 function goToMyQuestions() {
+  userMenuVisible.value = false
   router.push('/my-questions')
 }
 
-/**
- * 退出登录
- */
+function toggleUserMenu() {
+  userMenuVisible.value = !userMenuVisible.value
+}
+
+function closeUserMenu() {
+  userMenuVisible.value = false
+}
+
 function handleLogout() {
+  userMenuVisible.value = false
   ElMessageBox.confirm('确定要退出登录吗？', '提示', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     type: 'warning',
-  }).then(() => {
-    authStore.logout()
-  }).catch(() => {
-    // 取消退出
   })
+    .then(() => authStore.logout())
+    .catch(() => {})
 }
+
+onMounted(() => {
+  document.addEventListener('click', closeUserMenu)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', closeUserMenu)
+})
 </script>
 
 <template>
@@ -75,41 +68,29 @@ function handleLogout() {
     </div>
 
     <div class="header-right">
-      <!-- 主题切换 -->
-      <el-tooltip :content="appStore.isDark ? '切换亮色模式' : '切换暗色模式'" placement="bottom">
-        <el-button
-          :icon="appStore.isDark ? 'Sunny' : 'Moon'"
-          circle
-          @click="handleToggleTheme"
-        />
-      </el-tooltip>
-
-      <!-- 用户信息 -->
-      <el-dropdown trigger="click">
-        <div class="user-info">
+      <div class="user-menu-wrap" @click.stop>
+        <div class="user-info" @click="toggleUserMenu">
           <el-avatar :size="32" :src="getAvatarUrl()" :key="avatarTimestamp" :style="{ backgroundColor: '#534AB7' }">
             {{ authStore.currentUser?.username?.charAt(0)?.toUpperCase() || 'U' }}
           </el-avatar>
           <span class="user-name">{{ authStore.currentUser?.username || '用户' }}</span>
           <el-icon :size="12"><ArrowDown /></el-icon>
         </div>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item @click="goToProfile">
-              <el-icon><User /></el-icon>
-              个人中心
-            </el-dropdown-item>
-            <el-dropdown-item @click="goToMyQuestions">
-              <el-icon><Collection /></el-icon>
-              我的题库
-            </el-dropdown-item>
-            <el-dropdown-item divided @click="handleLogout">
-              <el-icon><SwitchButton /></el-icon>
-              退出登录
-            </el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
+        <div v-if="userMenuVisible" class="user-menu">
+          <button class="user-menu-item" @click="goToProfile">
+            <el-icon><User /></el-icon>
+            <span>个人中心</span>
+          </button>
+          <button class="user-menu-item" @click="goToMyQuestions">
+            <el-icon><Collection /></el-icon>
+            <span>我的题库</span>
+          </button>
+          <button class="user-menu-item danger" @click="handleLogout">
+            <el-icon><SwitchButton /></el-icon>
+            <span>退出登录</span>
+          </button>
+        </div>
+      </div>
     </div>
   </header>
 </template>
@@ -121,12 +102,15 @@ function handleLogout() {
   align-items: center;
   justify-content: space-between;
   padding: 0 var(--spacing-lg);
-  background: var(--color-card);
-  border-bottom: 1px solid var(--color-border-light);
+  background: var(--color-surface-input);
+  border-bottom: 1px solid var(--color-subtle-line);
+  box-shadow: 0 10px 30px rgba(9, 9, 11, 0.025);
+  backdrop-filter: blur(16px);
   flex-shrink: 0;
+  position: relative;
+  z-index: 5;
 }
 
-/* ========== 左侧 ========== */
 .header-left {
   display: flex;
   align-items: center;
@@ -138,33 +122,147 @@ function handleLogout() {
   height: 32px;
   border-radius: var(--radius-sm);
   object-fit: cover;
+  box-shadow: 0 8px 20px rgba(6, 182, 212, 0.16);
 }
 
 .app-title {
   font-size: var(--font-lg);
-  font-weight: 600;
+  font-weight: 700;
   color: var(--color-text);
+  letter-spacing: 0;
 }
 
-/* ========== 右侧 ========== */
 .header-right {
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
 }
 
+.theme-toggle-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.theme-toggle-wrap::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  z-index: 120;
+  min-width: 64px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: var(--color-text);
+  color: var(--color-text-inverse);
+  font-size: 12px;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+  box-shadow: 0 10px 24px rgba(9, 9, 11, 0.14);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -2px);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.theme-toggle-wrap::before {
+  content: "";
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 50%;
+  z-index: 121;
+  width: 8px;
+  height: 8px;
+  background: var(--color-text);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -2px) rotate(45deg);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.theme-toggle-wrap:hover::after,
+.theme-toggle-wrap:hover::before {
+  opacity: 1;
+  transform: translate(-50%, 0) rotate(0deg);
+}
+
+.theme-toggle-wrap:hover::before {
+  transform: translate(-50%, 0) rotate(45deg);
+}
+
 .user-info {
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
-  padding: 4px 8px;
-  border-radius: var(--radius-md);
+  padding: 5px 10px 5px 6px;
+  border: 1px solid var(--color-subtle-line);
+  border-radius: 999px;
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background 0.2s, box-shadow 0.2s, transform 0.2s;
+  background: var(--color-surface-glass-soft);
+}
+
+.user-menu-wrap {
+  position: relative;
+}
+
+.user-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: 148px;
+  padding: 6px;
+  background: var(--color-card);
+  border: 1px solid var(--color-subtle-line);
+  border-radius: 10px;
+  box-shadow: 0 16px 38px rgba(9, 9, 11, 0.12);
+  z-index: 100;
+}
+
+.user-menu::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  right: 22px;
+  width: 10px;
+  height: 10px;
+  background: var(--color-card);
+  border-left: 1px solid var(--color-subtle-line);
+  border-top: 1px solid var(--color-subtle-line);
+  transform: rotate(45deg);
+}
+
+.user-menu-item {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  color: var(--color-text-secondary);
+  font-size: var(--font-sm);
+  text-align: left;
+  background: transparent;
+}
+
+.user-menu-item:hover {
+  color: var(--color-primary);
+  background: var(--color-primary-lighter);
+}
+
+.user-menu-item.danger {
+  border-top: 1px solid var(--color-border-light);
+  margin-top: 4px;
+  border-radius: 0 0 8px 8px;
 }
 
 .user-info:hover {
-  background: var(--color-bg);
+  background: var(--color-surface-glass-strong);
+  box-shadow: 0 10px 24px rgba(36, 38, 66, 0.08);
+  transform: translateY(-1px);
 }
 
 .user-name {
@@ -176,14 +274,31 @@ function handleLogout() {
   white-space: nowrap;
 }
 
-/* ========== 响应式 ========== */
 @media (max-width: 768px) {
-  .app-title {
-    display: none;
-  }
-
+  .app-title,
   .user-name {
     display: none;
   }
+}
+
+:global(.theme-dark) .app-header {
+  background: linear-gradient(180deg, rgba(17, 19, 26, 0.92), rgba(9, 10, 15, 0.86));
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+:global(.theme-dark) .user-info {
+  background: rgba(22, 24, 34, 0.72);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+:global(.theme-dark) .user-menu {
+  background: #161822;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
+}
+
+:global(.theme-dark) .user-menu::before {
+  background: #161822;
+  border-color: rgba(255, 255, 255, 0.08);
 }
 </style>

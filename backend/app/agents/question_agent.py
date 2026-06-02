@@ -3,8 +3,10 @@
 使用 Tavily 搜索 + ChromaDB RAG + DeepSeek 生成高质量面试题
 """
 
+import ast
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -59,26 +61,125 @@ class QuestionAgent(BaseAgent):
     def _extract_json_payload(self, raw: str) -> Any | None:
         """Extract the first complete JSON object/array from an LLM response."""
         text = raw.strip()
-        if "```json" in text:
-            text = text.split("```json", 1)[1].split("```", 1)[0].strip()
-        elif "```" in text:
-            text = text.split("```", 1)[1].split("```", 1)[0].strip()
+        candidates = []
+
+        for match in re.finditer(r"```(?:json|JSON)?\s*([\s\S]*?)```", text):
+            candidates.append(match.group(1).strip())
+
+        candidates.append(text)
+        candidates.extend(self._iter_balanced_json_candidates(text))
+
+        for candidate in candidates:
+            payload = self._parse_json_candidate(candidate)
+            if payload is not None:
+                return payload
+        return None
+
+    def _parse_json_candidate(self, candidate: str) -> Any | None:
+        """Parse JSON with safe fallbacks for common LLM formatting issues."""
+        text = candidate.strip().strip("\ufeff")
+        if not text:
+            return None
+
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json|JSON)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text).strip()
+
+        variants = [
+            text,
+            re.sub(r",\s*([}\]])", r"\1", text),
+        ]
+        for value in variants:
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                try:
+                    return json.loads(value, strict=False)
+                except json.JSONDecodeError:
+                    pass
 
         try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
+            literal = ast.literal_eval(text)
+            if isinstance(literal, (list, dict)):
+                return literal
+        except (ValueError, SyntaxError):
+            return None
+        return None
 
-        decoder = json.JSONDecoder()
-        for index, char in enumerate(text):
+    def _iter_balanced_json_candidates(self, text: str) -> list[str]:
+        """Return balanced object/array substrings while respecting quoted strings."""
+        candidates = []
+        for start, char in enumerate(text):
             if char not in "[{":
                 continue
-            try:
-                payload, _ = decoder.raw_decode(text[index:])
-                return payload
-            except json.JSONDecodeError:
-                continue
-        return None
+            stack: list[str] = []
+            in_string = False
+            quote_char = ""
+            escaped = False
+            for index in range(start, len(text)):
+                current = text[index]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif current == "\\":
+                        escaped = True
+                    elif current == quote_char:
+                        in_string = False
+                    continue
+
+                if current in ("'", '"'):
+                    in_string = True
+                    quote_char = current
+                elif current in "[{":
+                    stack.append(current)
+                elif current in "]}":
+                    if not stack:
+                        break
+                    opener = stack[-1]
+                    if (opener == "[" and current != "]") or (opener == "{" and current != "}"):
+                        break
+                    stack.pop()
+                    if not stack:
+                        candidates.append(text[start:index + 1])
+                        break
+        return candidates
+
+    def _question_items_from_payload(self, payload: Any) -> list[Any]:
+        """Normalize wrapper formats such as {"questions": [...]} to a list."""
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("questions", "items", "data", "result"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+            return [payload]
+        return []
+
+    def _normalize_text(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (list, tuple)):
+            scalar_items = [str(item).strip() for item in value if not isinstance(item, (dict, list, tuple))]
+            if len(scalar_items) == len(value):
+                return "\n".join(f"- {item}" for item in scalar_items if item)
+        if isinstance(value, dict):
+            for key in ("reference_answer", "answer", "content", "text", "description"):
+                if value.get(key):
+                    return self._normalize_text(value.get(key))
+        return json.dumps(value, ensure_ascii=False, indent=2)
+
+    def _normalize_list(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in re.split(r"[,，;；\n]", value) if item.strip()]
+        if isinstance(value, (list, tuple)):
+            normalized = [self._normalize_text(item) for item in value]
+            return [item for item in normalized if item]
+        return [self._normalize_text(value)]
 
     async def _tavily_search(
         self,
@@ -265,20 +366,20 @@ class QuestionAgent(BaseAgent):
                 "tags": [category, difficulty],
             }]
         else:
-            questions = payload if isinstance(payload, list) else [payload]
+            questions = self._question_items_from_payload(payload)
 
         normalized_questions = []
         for item in questions:
             if not isinstance(item, dict):
                 continue
             normalized_questions.append({
-                "question": str(item.get("question") or item.get("title") or "").strip(),
+                "question": self._normalize_text(item.get("question") or item.get("title")),
                 "category": str(item.get("category") or category),
                 "difficulty": str(item.get("difficulty") or difficulty),
                 "type": str(item.get("type") or "面试题"),
-                "key_points": item.get("key_points") or item.get("reference_points") or [],
-                "reference_answer": str(item.get("reference_answer") or item.get("answer") or "").strip(),
-                "tags": item.get("tags") or [category, difficulty],
+                "key_points": self._normalize_list(item.get("key_points") or item.get("reference_points")),
+                "reference_answer": self._normalize_text(item.get("reference_answer") or item.get("answer")),
+                "tags": self._normalize_list(item.get("tags")) or [category, difficulty],
             })
 
         if not normalized_questions:

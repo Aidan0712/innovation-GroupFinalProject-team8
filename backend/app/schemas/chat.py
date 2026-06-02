@@ -22,7 +22,25 @@ class MessageResponse(BaseModel):
     content: str
     agent_name: str | None = None
     message_type: str
+    file_url: str | None = None
+    file_name: str | None = None
     created_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def fill_file_fields(cls, data):
+        if isinstance(data, dict):
+            metadata = data.get("metadata") or data.get("metadata_") or {}
+            if isinstance(metadata, dict):
+                data.setdefault("file_url", metadata.get("file_url"))
+                data.setdefault("file_name", metadata.get("file_name"))
+            return data
+
+        metadata = getattr(data, "metadata_", None) or {}
+        if isinstance(metadata, dict):
+            data.file_url = metadata.get("file_url")
+            data.file_name = metadata.get("file_name")
+        return data
 
     model_config = {"from_attributes": True}
 

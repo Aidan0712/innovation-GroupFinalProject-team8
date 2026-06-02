@@ -1,7 +1,7 @@
-version: '3.8'
+name: interview-assistant
 
 services:
-  # MySQL 数据库
+  # MySQL database
   db:
     image: mysql:8.0
     container_name: interview-db
@@ -11,11 +11,8 @@ services:
       MYSQL_DATABASE: ${DB_NAME:-interview_assistant}
       MYSQL_USER: ${DB_USER:-interview}
       MYSQL_PASSWORD: ${DB_PASSWORD:-interview123}
-    ports:
-      - "${DB_PORT:-3306}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
@@ -23,7 +20,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # Redis 缓存
+  # Redis cache
   redis:
     image: redis:7-alpine
     container_name: interview-redis
@@ -39,7 +36,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # 后端 API
+  # Backend API
   backend:
     build:
       context: ./backend
@@ -47,7 +44,8 @@ services:
     container_name: interview-backend
     restart: unless-stopped
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       - DATABASE_URL=mysql+pymysql://${DB_USER:-interview}:${DB_PASSWORD:-interview123}@db:3306/${DB_NAME:-interview_assistant}
       - REDIS_URL=redis://redis:6379/0
@@ -55,6 +53,8 @@ services:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./backend/uploads:/app/uploads
+      - ./artifacts:/app/artifacts
+      - ./chroma_db:/app/chroma_db
       - ./knowledge_base:/app/knowledge_base
     depends_on:
       db:
@@ -62,11 +62,11 @@ services:
       redis:
         condition: service_healthy
 
-  # 前端
+  # Frontend
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: frontend/Dockerfile
       args:
         - VITE_API_BASE_URL=${VITE_API_BASE_URL:-/api}
     container_name: interview-frontend

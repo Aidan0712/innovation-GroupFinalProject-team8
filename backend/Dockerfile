@@ -1,22 +1,30 @@
-# 后端 Dockerfile
-FROM python:3.11-slim
+# Backend Dockerfile
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# 系统依赖
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN set -eux; \
+    sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g; s|http://deb.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources; \
+    apt-get -o Acquire::Retries=5 update; \
+    apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     gcc \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Python 依赖
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 复制源代码
 COPY . .
 
-# 创建上传目录
-RUN mkdir -p /app/uploads/resumes /app/uploads/recordings
+RUN mkdir -p /app/uploads/resumes \
+    /app/uploads/recordings \
+    /app/uploads/temp \
+    /app/uploads/avatars \
+    /app/artifacts \
+    /app/chroma_db
 
 EXPOSE 8000
 

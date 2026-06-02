@@ -30,6 +30,17 @@ from app.api.auth import get_current_user, hash_password, verify_password
 
 router = APIRouter(prefix="/api/v1/profile", tags=["个人中心"])
 
+PROFILE_EXTRA_FIELDS = [
+    "education_level",
+    "degree",
+    "graduation_year",
+    "target_position",
+    "target_city",
+    "skills",
+    "certificates",
+    "internship_experience",
+]
+
 
 # ── 工具函数 ──
 
@@ -49,6 +60,24 @@ def get_profile_or_create(db: Session, user_id: int) -> "UserProfile":
         db.commit()
         db.refresh(profile)
     return profile
+
+
+def profile_payload(profile: UserProfile) -> dict:
+    data = {
+        "id": profile.id,
+        "user_id": profile.user_id,
+        "age": profile.age,
+        "gender": profile.gender,
+        "major": profile.major,
+        "grade": profile.grade,
+        "university": profile.university,
+        "allow_ai_use": profile.allow_ai_use,
+        "created_at": profile.created_at.isoformat() if profile.created_at else "",
+        "updated_at": profile.updated_at.isoformat() if profile.updated_at else "",
+    }
+    for field in PROFILE_EXTRA_FIELDS:
+        data[field] = getattr(profile, field, None)
+    return data
 
 
 # ── 获取个人信息 ──
@@ -73,18 +102,7 @@ async def get_profile(
             "role": current_user.role.value if current_user.role else "user",
             "created_at": current_user.created_at.isoformat() if current_user.created_at else "",
             # Profile 信息（嵌套）
-            "profile": {
-                "id": profile.id,
-                "user_id": profile.user_id,
-                "age": profile.age,
-                "gender": profile.gender,
-                "major": profile.major,
-                "grade": profile.grade,
-                "university": profile.university,
-                "allow_ai_use": profile.allow_ai_use,
-                "created_at": profile.created_at.isoformat() if profile.created_at else "",
-                "updated_at": profile.updated_at.isoformat() if profile.updated_at else "",
-            },
+            "profile": profile_payload(profile),
         },
     )
 
@@ -117,6 +135,11 @@ async def update_profile(
     if data.university is not None:
         profile.university = data.university
 
+    for field in PROFILE_EXTRA_FIELDS:
+        value = getattr(data, field, None)
+        if value is not None:
+            setattr(profile, field, value)
+
     db.commit()
     db.refresh(profile)
 
@@ -132,18 +155,7 @@ async def update_profile(
             "role": current_user.role.value if current_user.role else "user",
             "created_at": current_user.created_at.isoformat() if current_user.created_at else "",
             # Profile 信息（嵌套）
-            "profile": {
-                "id": profile.id,
-                "user_id": profile.user_id,
-                "age": profile.age,
-                "gender": profile.gender,
-                "major": profile.major,
-                "grade": profile.grade,
-                "university": profile.university,
-                "allow_ai_use": profile.allow_ai_use,
-                "created_at": profile.created_at.isoformat() if profile.created_at else "",
-                "updated_at": profile.updated_at.isoformat() if profile.updated_at else "",
-            },
+            "profile": profile_payload(profile),
         },
     )
 
@@ -210,18 +222,7 @@ async def change_username(
             "avatar_url": current_user.avatar_url,
             "role": current_user.role.value if current_user.role else "user",
             "created_at": current_user.created_at.isoformat() if current_user.created_at else "",
-            "profile": {
-                "id": profile.id,
-                "user_id": profile.user_id,
-                "age": profile.age,
-                "gender": profile.gender,
-                "major": profile.major,
-                "grade": profile.grade,
-                "university": profile.university,
-                "allow_ai_use": profile.allow_ai_use,
-                "created_at": profile.created_at.isoformat() if profile.created_at else "",
-                "updated_at": profile.updated_at.isoformat() if profile.updated_at else "",
-            },
+            "profile": profile_payload(profile),
         },
     )
 
@@ -286,16 +287,5 @@ async def toggle_ai_use(
     return APIResponse(
         code=0,
         message=f"{'已开启' if data.allow_ai_use else '已关闭'} AI 使用个人信息",
-        data={
-            "id": profile.id,
-            "user_id": profile.user_id,
-            "age": profile.age,
-            "gender": profile.gender,
-            "major": profile.major,
-            "grade": profile.grade,
-            "university": profile.university,
-            "allow_ai_use": profile.allow_ai_use,
-            "created_at": profile.created_at.isoformat() if profile.created_at else "",
-            "updated_at": profile.updated_at.isoformat() if profile.updated_at else "",
-        },
+        data=profile_payload(profile),
     )

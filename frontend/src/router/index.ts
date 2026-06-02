@@ -74,13 +74,21 @@ const router = createRouter({
   routes,
 })
 
-// 路由守卫
+function getDebugQuery() {
+  const params = new URLSearchParams(window.location.search)
+  const keepPanel = params.get('debug-panel') === '1' || sessionStorage.getItem('app-debug-panel') === '1'
+  if (!keepPanel) return {}
+
+  return {
+    'debug-panel': '1',
+    'debug-theme': params.get('debug-theme') || localStorage.getItem('app-theme') || 'light',
+  }
+}
+
 router.beforeEach((to, _from, next) => {
-  // 从 localStorage 判断是否已登录（简化处理，实际应通过 Pinia store 判断）
   const token = localStorage.getItem('access_token')
   const isLoggedIn = !!token
 
-  // 检查是否为管理员
   const userStr = localStorage.getItem('user')
   let isAdmin = false
   if (userStr) {
@@ -88,23 +96,26 @@ router.beforeEach((to, _from, next) => {
       const user = JSON.parse(userStr)
       isAdmin = user.role === 'admin'
     } catch {
-      // ignore
+      // Ignore malformed local user cache.
     }
   }
 
-  // 需要登录但未登录 → 跳转登录页
   if (to.meta.requiresAuth && !isLoggedIn) {
-    next({ name: 'Login', query: { redirect: to.fullPath } })
+    next({
+      name: 'Login',
+      query: {
+        redirect: to.fullPath,
+        ...getDebugQuery(),
+      },
+    })
     return
   }
 
-  // 已登录但访问游客页面（登录/注册） → 跳转首页
   if (to.meta.guest && isLoggedIn) {
     next({ name: 'Chat' })
     return
   }
 
-  // 需要管理员权限但非管理员 → 跳转首页
   if (to.meta.requiresAdmin && !isAdmin) {
     next({ name: 'Chat' })
     return

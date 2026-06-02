@@ -52,6 +52,25 @@ def ensure_schema_compatibility() -> None:
         with engine.begin() as conn:
             conn.execute(text(ddl))
 
+    profile_columns = {col["name"] for col in inspector.get_columns("user_profiles")}
+    profile_extra_columns = {
+        "education_level": "VARCHAR(64)",
+        "degree": "VARCHAR(64)",
+        "graduation_year": "VARCHAR(32)",
+        "target_position": "VARCHAR(128)",
+        "target_city": "VARCHAR(128)",
+        "skills": "VARCHAR(512)",
+        "certificates": "VARCHAR(512)",
+        "internship_experience": "VARCHAR(1024)",
+    }
+    with engine.begin() as conn:
+        for column, column_type in profile_extra_columns.items():
+            if column not in profile_columns:
+                if engine.dialect.name == "mysql":
+                    conn.execute(text(f"ALTER TABLE user_profiles ADD COLUMN {column} {column_type} NULL"))
+                else:
+                    conn.execute(text(f"ALTER TABLE user_profiles ADD COLUMN {column} TEXT NULL"))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -70,6 +89,8 @@ async def lifespan(app: FastAPI):
     for dir_path in upload_dirs:
         os.makedirs(dir_path, exist_ok=True)
         print(f"[启动] 确保目录存在: {dir_path}")
+    os.makedirs("artifacts", exist_ok=True)
+    print("[启动] 确保目录存在: artifacts")
 
     # 确保 ChromaDB 持久化目录存在
     os.makedirs(settings.CHROMA_PERSIST_DIR, exist_ok=True)

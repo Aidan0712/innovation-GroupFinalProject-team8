@@ -14,6 +14,14 @@ class ProfileInfo(BaseModel):
     major: str | None = None
     grade: str | None = None
     university: str | None = None
+    education_level: str | None = None
+    degree: str | None = None
+    graduation_year: str | None = None
+    target_position: str | None = None
+    target_city: str | None = None
+    skills: str | None = None
+    certificates: str | None = None
+    internship_experience: str | None = None
     allow_ai_use: bool = True
     created_at: str
     updated_at: str
@@ -45,6 +53,14 @@ class UserProfileResponse(BaseModel):
     major: str | None = None
     grade: str | None = None
     university: str | None = None
+    education_level: str | None = None
+    degree: str | None = None
+    graduation_year: str | None = None
+    target_position: str | None = None
+    target_city: str | None = None
+    skills: str | None = None
+    certificates: str | None = None
+    internship_experience: str | None = None
     allow_ai_use: bool = True
     created_at: str
     updated_at: str
@@ -60,6 +76,14 @@ class UserProfileUpdate(BaseModel):
     major: str | None = None
     grade: str | None = None
     university: str | None = None
+    education_level: str | None = None
+    degree: str | None = None
+    graduation_year: str | None = None
+    target_position: str | None = None
+    target_city: str | None = None
+    skills: str | None = None
+    certificates: str | None = None
+    internship_experience: str | None = None
 
 
 # ── 修改密码 ──

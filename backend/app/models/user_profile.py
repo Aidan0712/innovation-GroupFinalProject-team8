@@ -50,6 +50,54 @@ class UserProfile(Base):
         nullable=True,
         comment="就读大学",
     )
+    education_level: Mapped[str | None] = mapped_column(
+        String(64),
+        default=None,
+        nullable=True,
+        comment="学历（专科/本科/硕士/博士等）",
+    )
+    degree: Mapped[str | None] = mapped_column(
+        String(64),
+        default=None,
+        nullable=True,
+        comment="学位",
+    )
+    graduation_year: Mapped[str | None] = mapped_column(
+        String(32),
+        default=None,
+        nullable=True,
+        comment="毕业年份",
+    )
+    target_position: Mapped[str | None] = mapped_column(
+        String(128),
+        default=None,
+        nullable=True,
+        comment="目标岗位",
+    )
+    target_city: Mapped[str | None] = mapped_column(
+        String(128),
+        default=None,
+        nullable=True,
+        comment="目标城市",
+    )
+    skills: Mapped[str | None] = mapped_column(
+        String(512),
+        default=None,
+        nullable=True,
+        comment="技能关键词",
+    )
+    certificates: Mapped[str | None] = mapped_column(
+        String(512),
+        default=None,
+        nullable=True,
+        comment="证书/资格",
+    )
+    internship_experience: Mapped[str | None] = mapped_column(
+        String(1024),
+        default=None,
+        nullable=True,
+        comment="实习/项目经历摘要",
+    )
     allow_ai_use: Mapped[bool] = mapped_column(
         default=True,
         nullable=False,

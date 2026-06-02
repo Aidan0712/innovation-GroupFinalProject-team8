@@ -8,9 +8,12 @@ import logging
 import os
 import time
 import asyncio
+import re
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile
+from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 from sse_starlette.sse import EventSourceResponse
 
@@ -34,6 +37,88 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/chat", tags=["对话"])
 
+ARTIFACT_ROOT = Path("artifacts")
+
+
+def _artifact_dir(user_id: int, conversation_id: int) -> Path:
+    path = ARTIFACT_ROOT / str(user_id) / str(conversation_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _safe_artifact_name(name: str) -> str:
+    cleaned = re.sub(r"[\\/:*?\"<>|]+", "_", name).strip(" .")
+    return cleaned[:120] or "artifact"
+
+
+def _write_text_artifact(user_id: int, conversation_id: int, name: str, content: str, suffix: str) -> Path:
+    directory = _artifact_dir(user_id, conversation_id)
+    stem = _safe_artifact_name(name)
+    path = directory / f"{stem}{suffix}"
+    counter = 2
+    while path.exists():
+        path = directory / f"{stem}_{counter}{suffix}"
+        counter += 1
+    path.write_text(content or "", encoding="utf-8")
+    return path
+
+
+def _write_report_artifact(user_id: int, conversation_id: int, name: str, markdown: str) -> Path:
+    """Write a report as docx when python-docx is available, otherwise markdown."""
+    directory = _artifact_dir(user_id, conversation_id)
+    stem = _safe_artifact_name(name)
+    try:
+        from docx import Document
+
+        path = directory / f"{stem}.docx"
+        counter = 2
+        while path.exists():
+            path = directory / f"{stem}_{counter}.docx"
+            counter += 1
+        doc = Document()
+        doc.add_heading(name, level=1)
+        for line in (markdown or "").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                doc.add_paragraph("")
+            elif stripped.startswith("### "):
+                doc.add_heading(stripped[4:], level=3)
+            elif stripped.startswith("## "):
+                doc.add_heading(stripped[3:], level=2)
+            elif stripped.startswith("# "):
+                doc.add_heading(stripped[2:], level=1)
+            elif stripped.startswith("- "):
+                doc.add_paragraph(stripped[2:], style="List Bullet")
+            elif re.match(r"^\d+\.\s+", stripped):
+                doc.add_paragraph(re.sub(r"^\d+\.\s+", "", stripped), style="List Number")
+            else:
+                doc.add_paragraph(stripped)
+        doc.save(path)
+        return path
+    except Exception as exc:
+        logger.warning("写入 docx 产物失败，降级为 md: %s", exc)
+        return _write_text_artifact(user_id, conversation_id, name, markdown, ".md")
+
+
+def _preview_artifact_text(path: Path) -> str:
+    if path.suffix.lower() == ".docx":
+        try:
+            from docx import Document
+
+            doc = Document(path)
+            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        except Exception:
+            return "该 Word 文档暂时无法预览，可下载后查看。"
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _derive_conversation_title(content: str) -> str:
+    text = re.sub(r"[#>*_`~\[\]（）(){}|]+", " ", content or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return "文件分析"
+    return text[:24] + ("..." if len(text) > 24 else "")
+
 
 def _file_url_to_local_path(file_url: str) -> str:
     local_path = file_url.lstrip("/")
@@ -46,8 +131,58 @@ def _is_audio_file(file_url: str | None) -> bool:
     if not file_url:
         return False
     return os.path.splitext(file_url)[1].lower() in {
-        ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".mp4", ".avi", ".mov"
+        ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".mp4", ".avi", ".mov", ".mkv", ".webm"
     }
+
+
+def _is_resume_file(file_url: str | None) -> bool:
+    if not file_url:
+        return False
+    return os.path.splitext(file_url)[1].lower() in {
+        ".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".webp", ".bmp"
+    }
+
+
+def _parse_file_urls(file_url: str | None, file_urls: str | None) -> list[str]:
+    urls: list[str] = []
+    if file_urls:
+        for item in file_urls.split(","):
+            cleaned = item.strip()
+            if cleaned and cleaned not in urls:
+                urls.append(cleaned)
+    if file_url and file_url not in urls:
+        urls.insert(0, file_url)
+    return urls
+
+
+def _parse_file_names(file_names: str | None, file_urls: list[str]) -> list[str]:
+    names: list[str] = []
+    if file_names:
+        for item in file_names.split(","):
+            cleaned = item.strip()
+            if cleaned:
+                names.append(cleaned)
+    if len(names) < len(file_urls):
+        names.extend(Path(url).name for url in file_urls[len(names):])
+    return names[:len(file_urls)]
+
+
+def _select_file_for_agent(task: dict, file_urls: list[str]) -> str | None:
+    assigned = task.get("file_urls")
+    if isinstance(assigned, list) and assigned:
+        return str(assigned[0])
+
+    agent_type = task.get("agent_type")
+    if agent_type == "resume":
+        return next((url for url in file_urls if _is_resume_file(url)), None)
+    if agent_type == "recording":
+        return next((url for url in file_urls if _is_audio_file(url)), None)
+    if agent_type == "question":
+        return (
+            next((url for url in file_urls if _is_resume_file(url)), None)
+            or next((url for url in file_urls if _is_audio_file(url)), None)
+        )
+    return None
 
 
 async def _stream_content_chars(
@@ -159,6 +294,20 @@ async def _build_user_context(db: Session, user_id: int) -> str:
         parts.append(f"- 专业：{profile.major}")
     if profile.grade:
         parts.append(f"- 年级：{profile.grade}")
+    extra_labels = {
+        "education_level": "学历",
+        "degree": "学位",
+        "graduation_year": "毕业年份",
+        "target_position": "目标岗位",
+        "target_city": "目标城市",
+        "skills": "技能关键词",
+        "certificates": "证书/资格",
+        "internship_experience": "实习/项目经历",
+    }
+    for field, label in extra_labels.items():
+        value = getattr(profile, field, None)
+        if value:
+            parts.append(f"- {label}：{value}")
 
     if not parts:
         return ""
@@ -198,15 +347,15 @@ async def _generate_resume_sse(
     try:
         # 获取用户个人信息上下文
         user_context = await _build_user_context(db, user_id)
+        report_parts: list[str] = []
 
         async for chunk in agent.evaluate_stream(local_path, user_message or None, user_context or ""):
             if chunk["type"] == "thinking":
-                yield json.dumps({
-                    "type": "thinking",
-                    "content": chunk["content"],
-                    "done": False,
-                }, ensure_ascii=False)
+                # Qwen-VL 的 reasoning_content 是内部推理，可能包含未确认的岗位猜测；
+                # 前端只展示明确的状态与正式报告，避免把中间推测误当成结论。
+                continue
             elif chunk["type"] == "content":
+                report_parts.append(chunk["content"])
                 async for text_chunk in _stream_content_chars(chunk["content"], agent_name="简历评估"):
                     yield text_chunk
             elif chunk["type"] == "status":
@@ -216,6 +365,9 @@ async def _generate_resume_sse(
                     "message": chunk.get("message", "处理中..."),
                     "progress": chunk.get("progress", 0),
                 }, ensure_ascii=False)
+        report_text = "".join(report_parts).strip()
+        if report_text:
+            _write_report_artifact(user_id, conversation_id, "简历评估报告", report_text)
     except Exception as e:
         logger.error(f"简历评估失败: {e}", exc_info=True)
         async for text_chunk in _stream_content_chars(f"[简历评估失败: {str(e)}]", agent_name="简历评估"):
@@ -273,7 +425,13 @@ async def _generate_recording_sse(
 
             # 转写内容
             if result.get("transcription"):
-                report_parts.append(f"## 📝 转写内容\n\n{result['transcription']}")
+                _write_text_artifact(user_id, conversation_id, "录音转写内容", result["transcription"], ".txt")
+                yield json.dumps({
+                    "type": "status",
+                    "agent_name": "录音分析",
+                    "message": "录音转写已保存到右侧产物栏",
+                    "progress": 75,
+                }, ensure_ascii=False)
 
             # 音频信息
             duration = result.get("duration_seconds", 0)
@@ -299,8 +457,12 @@ async def _generate_recording_sse(
                     report_parts.append(f"\n{analysis}")
 
             content = "\n".join(report_parts)
+            if content.strip():
+                _write_report_artifact(user_id, conversation_id, "面试录音评估报告", content)
         else:
             content = str(result)
+            if content.strip():
+                _write_report_artifact(user_id, conversation_id, "面试录音评估报告", content)
 
         async for text_chunk in _stream_content_chars(content, agent_name="录音分析"):
             yield text_chunk
@@ -415,13 +577,14 @@ async def _generate_question_sse(
     yield json.dumps({"type": "content", "content": "", "done": True}, ensure_ascii=False)
 
 
-async def _resolve_agent_decision(agent_type: str, content: str, file_url: str | None) -> dict:
+async def _resolve_agent_decision(agent_type: str, content: str, file_urls: list[str]) -> dict:
     """统一入口：由主 Agent 生成调度计划。"""
     from app.agents.orchestrator import OrchestratorAgent
 
     return await OrchestratorAgent().plan_route(
         content=content,
-        file_url=file_url,
+        file_url=file_urls[0] if file_urls else None,
+        file_urls=file_urls,
         requested_agent=agent_type or "general",
     )
 
@@ -432,8 +595,26 @@ def _format_orchestrator_note(decision: dict) -> str:
         "recording": "录音分析 Agent",
         "question": "面试题生成 Agent",
         "general": "通用面试助手",
+        "multi": "多 Agent 编排",
     }
+    tasks = decision.get("tasks") if isinstance(decision.get("tasks"), list) else []
     agent_type = decision.get("agent_type", "general")
+    if tasks:
+        task_lines = []
+        for index, task in enumerate(tasks, 1):
+            task_lines.append(
+                f"{index}. {agent_name_map.get(task.get('agent_type'), task.get('agent_type'))}"
+                f"：{task.get('reason', '根据子任务需要调用。')}"
+            )
+        return (
+            "## 主 Agent 调度\n"
+            f"- **任务模式**：{'多 Agent 编排' if len(tasks) > 1 else '单 Agent 调用'}\n"
+            f"- **调用模块**：{' → '.join(agent_name_map.get(t.get('agent_type'), str(t.get('agent_type'))) for t in tasks)}\n"
+            f"- **判断依据**：{decision.get('reason', '根据用户当前请求进行调度。')}\n\n"
+            "**子任务计划：**\n"
+            + "\n".join(task_lines)
+            + "\n\n---\n\n"
+        )
     return (
         "## 主 Agent 调度\n"
         f"- **识别意图**：{decision.get('intent', 'interview_help')}\n"
@@ -746,6 +927,8 @@ async def stream_chat(
     message_type: str = Query(default="text", description="消息类型"),
     agent_type: str = Query(default="general", description="目标Agent类型：general/resume/recording/question"),
     file_url: str | None = Query(default=None, description="上传文件的URL（简历/录音）"),
+    file_urls: str | None = Query(default=None, description="多个上传文件URL，逗号分隔"),
+    file_names: str | None = Query(default=None, description="多个上传文件原始名称，逗号分隔"),
     token: str | None = Query(default=None, alias="token", description="JWT Token（EventSource 无法设置 Header，通过 query 传递）"),
     db: Session = Depends(get_db),
 ):
@@ -772,8 +955,16 @@ async def stream_chat(
             detail="用户不存在",
         )
 
-    logger.info(f"SSE 请求: conversation_id={conversation_id}, agent_type={agent_type}, file_url={file_url}, content={content[:50] if content else '(empty)'}")
-    agent_decision = await _resolve_agent_decision(agent_type, content, file_url)
+    uploaded_file_urls = _parse_file_urls(file_url, file_urls)
+    uploaded_file_names = _parse_file_names(file_names, uploaded_file_urls)
+    logger.info(
+        "SSE 请求: conversation_id=%s, agent_type=%s, file_urls=%s, content=%s",
+        conversation_id,
+        agent_type,
+        uploaded_file_urls,
+        content[:50] if content else "(empty)",
+    )
+    agent_decision = await _resolve_agent_decision(agent_type, content, uploaded_file_urls)
     resolved_agent_type = agent_decision.get("agent_type", "general")
 
     # 验证会话归属
@@ -792,12 +983,22 @@ async def stream_chat(
             detail="会话不存在",
         )
 
+    existing_message_count = db.query(Message).filter(Message.conversation_id == conversation_id).count()
+    if existing_message_count == 0 and (not conversation.title or conversation.title == "新对话"):
+        conversation.title = _derive_conversation_title(content)
+
     # 保存用户消息
     user_msg = Message(
         conversation_id=conversation_id,
         role="user",
         content=content,
-        message_type=message_type or "text",
+        message_type="file" if uploaded_file_urls else (message_type or "text"),
+        metadata_=({
+            "file_url": uploaded_file_urls[0],
+            "file_urls": uploaded_file_urls,
+            "file_name": "、".join(uploaded_file_names),
+            "file_names": uploaded_file_names,
+        } if uploaded_file_urls else None),
     )
     db.add(user_msg)
     db.commit()
@@ -819,54 +1020,81 @@ async def stream_chat(
                 "progress": 10,
             }, ensure_ascii=False)}
 
-            # 根据主 Agent 意图识别结果路由到不同的处理逻辑
-            if resolved_agent_type == "resume" and file_url:
-                # 简历评估 Agent
-                async for chunk_json in _generate_resume_sse(
-                    conversation_id, file_url, content, current_user.id, db
-                ):
+            async def forward_agent_stream(stream):
+                nonlocal full_response
+                async for chunk_json in stream:
                     chunk_data = json.loads(chunk_json)
                     if chunk_data.get("done"):
-                        yield {"event": "done", "data": "{}"}
-                    else:
-                        yield {"event": "message", "data": chunk_json}
-                        if chunk_data.get("type") == "content":
-                            full_response += chunk_data.get("content", "")
-            elif resolved_agent_type == "recording" and file_url:
-                # 录音分析 Agent
-                async for chunk_json in _generate_recording_sse(
-                    conversation_id, file_url, content, current_user.id, db
-                ):
-                    chunk_data = json.loads(chunk_json)
-                    if chunk_data.get("done"):
-                        yield {"event": "done", "data": "{}"}
-                    else:
-                        yield {"event": "message", "data": chunk_json}
-                        if chunk_data.get("type") == "content":
-                            full_response += chunk_data.get("content", "")
-            elif resolved_agent_type == "question":
-                async for chunk_json in _generate_question_sse(
-                    conversation_id, content, current_user.id, db, file_url
-                ):
-                    chunk_data = json.loads(chunk_json)
-                    if chunk_data.get("done"):
-                        yield {"event": "done", "data": "{}"}
-                    else:
-                        yield {"event": "message", "data": chunk_json}
-                        if chunk_data.get("type") == "content":
-                            full_response += chunk_data.get("content", "")
-            else:
-                # 默认：主 Agent（DeepSeek 对话）
-                async for chunk_json in _generate_sse_response(
-                    conversation_id, content, current_user.id, db
-                ):
-                    chunk_data = json.loads(chunk_json)
-                    if chunk_data.get("done"):
-                        yield {"event": "done", "data": "{}"}
-                    else:
-                        yield {"event": "message", "data": chunk_json}
-                        if chunk_data.get("type") == "content":
-                            full_response += chunk_data.get("content", "")
+                        continue
+                    yield {"event": "message", "data": chunk_json}
+                    if chunk_data.get("type") == "content":
+                        full_response += chunk_data.get("content", "")
+
+            tasks = agent_decision.get("tasks") if isinstance(agent_decision.get("tasks"), list) else []
+            if not tasks:
+                tasks = [{
+                    "agent_type": resolved_agent_type,
+                    "intent": agent_decision.get("intent", "interview_help"),
+                    "reason": agent_decision.get("reason", "主 Agent 选择单 Agent 处理。"),
+                    "file_urls": uploaded_file_urls[:1],
+                }]
+
+            for index, task in enumerate(tasks, 1):
+                task_agent = task.get("agent_type", "general")
+                task_file_url = _select_file_for_agent(task, uploaded_file_urls)
+                task_title = {
+                    "resume": "简历评估 Agent",
+                    "recording": "录音分析 Agent",
+                    "question": "面试题生成 Agent",
+                    "general": "通用面试助手",
+                }.get(task_agent, str(task_agent))
+
+                if len(tasks) > 1:
+                    section = f"\n\n## 子任务 {index}：{task_title}\n\n{task.get('reason', '')}\n\n"
+                    async for section_chunk in _stream_content_chars(section, agent_name="主Agent"):
+                        yield {"event": "message", "data": section_chunk}
+                        full_response += json.loads(section_chunk).get("content", "")
+
+                yield {"event": "message", "data": json.dumps({
+                    "type": "status",
+                    "agent_name": task_title,
+                    "message": task.get("reason", "子 Agent 正在处理..."),
+                    "progress": min(95, 15 + index * 20),
+                }, ensure_ascii=False)}
+
+                if task_agent == "resume" and task_file_url:
+                    async for event in forward_agent_stream(_generate_resume_sse(
+                        conversation_id, task_file_url, content, current_user.id, db
+                    )):
+                        yield event
+                elif task_agent == "recording" and task_file_url:
+                    async for event in forward_agent_stream(_generate_recording_sse(
+                        conversation_id, task_file_url, content, current_user.id, db
+                    )):
+                        yield event
+                elif task_agent == "question":
+                    async for event in forward_agent_stream(_generate_question_sse(
+                        conversation_id, content, current_user.id, db, task_file_url
+                    )):
+                        yield event
+                elif task_agent == "general":
+                    if uploaded_file_urls:
+                        warning = (
+                            "\n\n> 主 Agent 说明：通用面试助手没有原始文件解析权限。"
+                            "涉及文件的任务会优先交给简历、录音或题目 Agent；当前仅处理纯文本部分。\n\n"
+                        )
+                        async for warning_chunk in _stream_content_chars(warning, agent_name="主Agent"):
+                            yield {"event": "message", "data": warning_chunk}
+                            full_response += json.loads(warning_chunk).get("content", "")
+                    async for event in forward_agent_stream(_generate_sse_response(
+                        conversation_id, content, current_user.id, db
+                    )):
+                        yield event
+                else:
+                    missing = f"\n\n[{task_title} 无法执行：没有匹配到可处理的上传文件]\n\n"
+                    async for missing_chunk in _stream_content_chars(missing, agent_name="主Agent"):
+                        yield {"event": "message", "data": missing_chunk}
+                        full_response += json.loads(missing_chunk).get("content", "")
 
             # 保存 AI 回复到数据库（只保存正式回复，不含思考过程）
             from app.database import SessionLocal
@@ -894,6 +1122,8 @@ async def stream_chat(
                 save_db.commit()
             finally:
                 save_db.close()
+
+            yield {"event": "done", "data": "{}"}
 
         except Exception as e:
             logger.error(f"SSE 事件流异常: {e}", exc_info=True)
@@ -923,6 +1153,89 @@ async def stream_chat(
             }
 
     return EventSourceResponse(event_generator())
+
+
+@router.get(
+    "/conversations/{conversation_id}/artifacts",
+    response_model=APIResponse[list[dict]],
+    summary="获取会话产物列表",
+)
+async def list_artifacts(
+    conversation_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    conversation = (
+        db.query(Conversation)
+        .filter(Conversation.id == conversation_id, Conversation.user_id == current_user.id)
+        .first()
+    )
+    if not conversation:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话不存在")
+
+    directory = _artifact_dir(current_user.id, conversation_id)
+    items = []
+    for path in sorted(directory.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        items.append({
+            "name": path.name,
+            "size": stat.st_size,
+            "type": path.suffix.lower().lstrip(".") or "file",
+            "created_at": stat.st_mtime,
+            "preview_url": f"/api/v1/chat/conversations/{conversation_id}/artifacts/{path.name}/preview",
+            "download_url": f"/api/v1/chat/conversations/{conversation_id}/artifacts/{path.name}/download",
+        })
+    return APIResponse(data=items)
+
+
+@router.get(
+    "/conversations/{conversation_id}/artifacts/{filename}/preview",
+    summary="预览会话产物",
+)
+async def preview_artifact(
+    conversation_id: int,
+    filename: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    conversation = (
+        db.query(Conversation)
+        .filter(Conversation.id == conversation_id, Conversation.user_id == current_user.id)
+        .first()
+    )
+    if not conversation:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话不存在")
+    safe_name = Path(filename).name
+    path = _artifact_dir(current_user.id, conversation_id) / safe_name
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="产物不存在")
+    return PlainTextResponse(_preview_artifact_text(path))
+
+
+@router.get(
+    "/conversations/{conversation_id}/artifacts/{filename}/download",
+    summary="下载会话产物",
+)
+async def download_artifact(
+    conversation_id: int,
+    filename: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    conversation = (
+        db.query(Conversation)
+        .filter(Conversation.id == conversation_id, Conversation.user_id == current_user.id)
+        .first()
+    )
+    if not conversation:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话不存在")
+    safe_name = Path(filename).name
+    path = _artifact_dir(current_user.id, conversation_id) / safe_name
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="产物不存在")
+    return FileResponse(path, filename=safe_name)
 
 
 @router.post(

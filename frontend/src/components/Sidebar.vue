@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessageBox, ElMessage } from 'element-plus'
@@ -7,57 +7,36 @@ import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
 import { formatRelativeTime } from '@/utils'
 
-/**
- * 左侧边栏组件
- * 显示对话列表、新建对话按钮、后台管理入口
- */
-
 const router = useRouter()
 const route = useRoute()
 const chatStore = useChatStore()
 const authStore = useAuthStore()
 const appStore = useAppStore()
 
-/** 侧边栏宽度样式 */
 const sidebarWidth = computed(() =>
   appStore.sidebarCollapsed ? '64px' : 'var(--sidebar-width)'
 )
 
-/**
- * 新建对话
- */
 async function handleNewChat() {
   try {
     await chatStore.createConversation('新对话', 'general')
   } catch {
-    // 创建失败时不阻塞
+    // Keep the UI quiet; API errors are surfaced elsewhere.
   }
 }
 
-/**
- * 切换对话
- */
 function handleSelectConversation(conversationId: number | string) {
   chatStore.switchConversation(conversationId)
 }
 
-/**
- * 跳转后台管理
- */
 function goToAdmin() {
   router.push('/admin')
 }
 
-/**
- * 判断当前是否在后台管理页面
- */
 const isInAdmin = computed(() => route.path.startsWith('/admin'))
 
-/**
- * 删除对话
- */
 async function handleDeleteConversation(e: Event, conversationId: number | string) {
-  e.stopPropagation() // 防止触发切换对话
+  e.stopPropagation()
   try {
     await ElMessageBox.confirm('确定要删除这条对话记录吗？删除后不可恢复。', '删除对话', {
       confirmButtonText: '删除',
@@ -67,14 +46,22 @@ async function handleDeleteConversation(e: Event, conversationId: number | strin
     await chatStore.deleteConversation(conversationId)
     ElMessage.success('对话已删除')
   } catch {
-    // 用户取消或删除失败，忽略
+    // User canceled or deletion failed.
   }
+}
+
+function plainPreview(text?: string | null) {
+  if (!text) return '暂无消息'
+  return text
+    .replace(/```[\s\S]*?```/g, '代码片段')
+    .replace(/[#>*_`~\[\]()+|!-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || '暂无消息'
 }
 </script>
 
 <template>
   <aside class="sidebar" :style="{ width: sidebarWidth }">
-    <!-- 顶部：新建对话（仅展开时显示） -->
     <div v-if="!appStore.sidebarCollapsed" class="sidebar-header">
       <el-button
         type="primary"
@@ -86,18 +73,15 @@ async function handleDeleteConversation(e: Event, conversationId: number | strin
       </el-button>
     </div>
 
-    <!-- 对话列表 -->
     <div v-if="!appStore.sidebarCollapsed" class="conversations-section">
       <div class="section-title">对话历史</div>
 
       <div class="conversations-list">
-        <!-- 空状态 -->
         <div v-if="chatStore.conversations.length === 0" class="empty-state">
           <el-icon :size="24" color="#9E9D9A"><ChatLineRound /></el-icon>
           <span>暂无对话记录</span>
         </div>
 
-        <!-- 对话列表项 -->
         <div
           v-for="conv in chatStore.conversations"
           :key="conv.id"
@@ -117,7 +101,7 @@ async function handleDeleteConversation(e: Event, conversationId: number | strin
             </div>
           </div>
           <div class="conv-preview text-ellipsis">
-            {{ conv.last_message || '暂无消息' }}
+            {{ plainPreview(conv.last_message) }}
           </div>
           <div class="conv-meta">
             <span class="conv-count">共 {{ conv.message_count }} 条</span>
@@ -126,9 +110,7 @@ async function handleDeleteConversation(e: Event, conversationId: number | strin
       </div>
     </div>
 
-    <!-- 底部操作区 -->
     <div class="sidebar-footer">
-      <!-- 后台管理入口（仅管理员可见） -->
       <div
         v-if="authStore.isAdmin && !appStore.sidebarCollapsed"
         class="footer-item"
@@ -139,13 +121,12 @@ async function handleDeleteConversation(e: Event, conversationId: number | strin
         <span>后台管理</span>
       </div>
 
-      <!-- 折叠/展开按钮 -->
       <div class="footer-item" @click="appStore.toggleSidebar()">
         <el-icon :size="18">
           <Fold v-if="!appStore.sidebarCollapsed" />
           <Expand v-else />
         </el-icon>
-        <span v-if="!appStore.sidebarCollapsed">收起侧栏</span>
+        <span v-if="!appStore.sidebarCollapsed">收起</span>
       </div>
     </div>
   </aside>
@@ -153,7 +134,9 @@ async function handleDeleteConversation(e: Event, conversationId: number | strin
 
 <style scoped>
 .sidebar {
-  height: calc(100vh - var(--header-height));
+  height: 100%;
+  min-height: 0;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   background: var(--color-card);
@@ -162,7 +145,6 @@ async function handleDeleteConversation(e: Event, conversationId: number | strin
   overflow: hidden;
 }
 
-/* ========== 顶部 ========== */
 .sidebar-header {
   padding: var(--spacing-md);
   border-bottom: 1px solid var(--color-border-light);
@@ -170,11 +152,16 @@ async function handleDeleteConversation(e: Event, conversationId: number | strin
 
 .new-chat-btn {
   width: 100%;
+  height: 44px;
+  border: none;
+  border-radius: 12px;
+  background: var(--theme-gradient);
+  box-shadow: 0 12px 24px rgba(83, 74, 183, 0.18);
 }
 
-/* ========== 对话列表 ========== */
 .conversations-section {
   flex: 1;
+  min-height: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -195,7 +182,6 @@ async function handleDeleteConversation(e: Event, conversationId: number | strin
   padding: 0 var(--spacing-sm);
 }
 
-/* 空状态 */
 .empty-state {
   display: flex;
   flex-direction: column;
@@ -207,13 +193,13 @@ async function handleDeleteConversation(e: Event, conversationId: number | strin
   font-size: var(--font-sm);
 }
 
-/* 对话列表项 */
 .conversation-item {
-  padding: 10px 12px;
+  padding: 9px 11px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background 0.2s, border-color 0.2s;
   margin-bottom: 2px;
+  border: 1px solid transparent;
 }
 
 .conversation-item:hover {
@@ -222,6 +208,25 @@ async function handleDeleteConversation(e: Event, conversationId: number | strin
 
 .conversation-item.active {
   background: var(--color-primary-lighter);
+}
+
+:global(.theme-dark) .conversation-item:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+:global(.theme-dark) .conversation-item.active {
+  background: rgba(79, 70, 229, 0.16);
+  border-color: rgba(99, 102, 241, 0.22);
+}
+
+:global(.theme-dark) .conversation-item.active .conv-title {
+  color: #F3F4F6;
+}
+
+:global(.theme-dark) .conversation-item.active .conv-preview,
+:global(.theme-dark) .conversation-item.active .conv-count,
+:global(.theme-dark) .conversation-item.active .conv-time {
+  color: #A7AFBE;
 }
 
 .conv-header {
@@ -283,11 +288,10 @@ async function handleDeleteConversation(e: Event, conversationId: number | strin
   color: var(--color-text-placeholder);
 }
 
-/* ========== 底部操作区 ========== */
 .sidebar-footer {
   padding: var(--spacing-sm) 0;
   border-top: 1px solid var(--color-border-light);
-  margin-top: auto; /* 始终推到底部 */
+  margin-top: auto;
 }
 
 .footer-item {
