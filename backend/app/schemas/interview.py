@@ -24,11 +24,15 @@ class InterviewAnswerRequest(BaseModel):
     answer_text: str | None = Field(default=None, max_length=20000, description="文字回答")
     answer_audio_url: str | None = Field(default=None, max_length=512, description="音频回答地址")
     answer_duration_seconds: int | None = Field(default=None, ge=0, description="回答时长，单位秒")
+    recording_id: int | None = Field(default=None, ge=1, description="录音记录ID，用于从转写文本中获取回答")
 
     @model_validator(mode="after")
     def validate_answer(self) -> Self:
-        if not (self.answer_text and self.answer_text.strip()) and not self.answer_audio_url:
-            raise ValueError("answer_text 和 answer_audio_url 至少提供一项")
+        has_text = self.answer_text and self.answer_text.strip()
+        has_audio = bool(self.answer_audio_url)
+        has_recording = bool(self.recording_id)
+        if not has_text and not has_audio and not has_recording:
+            raise ValueError("answer_text、answer_audio_url 和 recording_id 至少提供一项")
         return self
 
 
