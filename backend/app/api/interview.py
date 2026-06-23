@@ -20,6 +20,7 @@ from app.config import settings
 from app.database import get_db
 from app.models.conversation import Conversation
 from app.models.interview import InterviewSession, InterviewTurn
+from app.models.recording import InterviewRecording
 from app.models.user import User
 from app.schemas.common import APIResponse, PaginatedResponse
 from app.schemas.interview import (
@@ -698,6 +699,19 @@ async def answer_session(
     turn = next((item for item in session.turns if item.answered_at is None), None)
     if not turn:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前没有待回答的问题")
+
+    # 如果 answer_text 为空但传了 recording_id，从录音转写文本中获取回答
+    if not (request.answer_text and request.answer_text.strip()) and request.recording_id:
+        recording = (
+            db.query(InterviewRecording)
+            .filter(
+                InterviewRecording.id == request.recording_id,
+                InterviewRecording.user_id == current_user.id,
+            )
+            .first()
+        )
+        if recording and recording.transcript:
+            request.answer_text = recording.transcript
 
     result = _score_answer(session, turn, request)
     turn.answer_text = request.answer_text.strip() if request.answer_text else None

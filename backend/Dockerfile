@@ -12,6 +12,7 @@ RUN set -eux; \
     apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     gcc \
     poppler-utils \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

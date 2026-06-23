@@ -5,11 +5,38 @@
 """
 
 import json
+import logging
 import re
 from typing import Any, Optional
 
 from app.config import settings
 from app.models.interview import InterviewSession, InterviewTurn
+
+logger = logging.getLogger(__name__)
+
+# 面试反馈系统提示词（Qwen / DashScope）
+INTERVIEW_FEEDBACK_SYSTEM_PROMPT = """你是一位资深的技术面试官，请对候选人的回答进行专业评估。
+
+请根据以下维度评估回答：
+1. 内容相关性（是否回答了问题）
+2. 结构清晰度（是否有条理、有逻辑）
+3. 深度和细节（是否有具体例子、数据支撑）
+4. 语言表达（是否流畅、专业）
+
+请直接输出 JSON 格式，不要输出其他内容。JSON 格式如下：
+{
+    "score": <0-100 的数值>,
+    "feedback": "<100-200字的具体反馈，指出优点和不足>",
+    "suggestion": "<50-100字的改进建议>"
+}
+
+注意：
+- score 要根据回答质量客观给出，不要总是给高分
+- feedback 要具体，指出回答中的具体优点和不足
+- suggestion 要可操作，给出具体的改进方向
+- 如果回答很短（少于20字），score 不要超过60
+- 如果回答离题或不相关，score 不要超过50
+"""
 
 
 class InterviewScoringService:
@@ -493,3 +520,114 @@ action_plan: 4 到 6 条后续训练计划。"""
                 report[key] = [str(item).strip() for item in value if str(item).strip()]
 
         return report
+
+    async def generate_feedback(
+        self,
+        question: str,
+        answer: str,
+    ) -> dict[str, Any]:
+        """
+        使用 DashScope Qwen 模型生成个性化面试反馈
+
+        与 score_with_llm 互补，提供另一种风格的 AI 反馈。
+
+        Args:
+            question: 面试问题
+            answer: 候选人回答
+
+        Returns:
+            {"score": float, "feedback": str, "suggestion": str}
+        """
+        if not answer or not answer.strip():
+            return {
+                "score": 65.0,
+                "feedback": "未检测到回答内容，请重新回答。",
+                "suggestion": "请确保麦克风正常工作，并清晰地说出你的回答。",
+            }
+
+        dashscope_key = (settings.DASHSCOPE_API_KEY or "").strip()
+        if not dashscope_key:
+            return self._rule_based_feedback(answer)
+
+        user_prompt = f"面试问题：{question}\n\n候选人回答：{answer}\n\n请给出评分和反馈。"
+
+        try:
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(
+                api_key=dashscope_key,
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            )
+
+            response = await client.chat.completions.create(
+                model="qwen-turbo",
+                messages=[
+                    {"role": "system", "content": INTERVIEW_FEEDBACK_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+            )
+
+            content = response.choices[0].message.content.strip()
+
+            try:
+                result = json.loads(content)
+            except json.JSONDecodeError:
+                import re as _re
+                json_match = _re.search(r"\{.*\}", content, _re.DOTALL)
+                if json_match:
+                    result = json.loads(json_match.group())
+                else:
+                    raise ValueError("无法解析 AI 返回的 JSON")
+
+            score = float(result.get("score", 70))
+            score = max(0, min(100, score))
+            feedback = str(result.get("feedback", "回答已收到"))
+            suggestion = str(result.get("suggestion", "继续加油"))
+
+            return {
+                "score": round(score, 2),
+                "feedback": feedback,
+                "suggestion": suggestion,
+            }
+
+        except Exception as exc:
+            logger.error("Qwen 反馈生成失败: %s", exc)
+            return self._rule_based_feedback(answer)
+
+    def _rule_based_feedback(self, answer: str) -> dict[str, Any]:
+        """降级方案：基于规则的简单反馈"""
+        length = len(answer.strip())
+        score = 70.0
+
+        if length < 20:
+            score = 50.0
+        elif length < 60:
+            score = 65.0
+        elif length < 150:
+            score = 78.0
+        else:
+            score = 86.0
+
+        structure_markers = ["首先", "其次", "最后", "例如", "因此", "结果", "第一", "第二"]
+        score += min(sum(marker in answer for marker in structure_markers) * 2, 8)
+        score = round(max(0.0, min(score, 100.0)), 2)
+
+        if score >= 85:
+            feedback = "回答内容充分，结构清晰，并体现了较好的岗位理解。"
+            suggestion = "继续补充可量化结果，让优势更有说服力。"
+        elif score >= 70:
+            feedback = "回答覆盖了主要信息，具备一定条理性。"
+            suggestion = "建议增加具体案例或更清晰的结构划分。"
+        elif score >= 60:
+            feedback = "回答基本切题，但内容和结构有待加强。"
+            suggestion = "建议先列出回答要点，再组织语言。"
+        else:
+            feedback = "回答内容较少或离题，需要更多练习。"
+            suggestion = "建议多进行模拟面试，提高表达能力和自信心。"
+
+        return {
+            "score": score,
+            "feedback": feedback,
+            "suggestion": suggestion,
+        }

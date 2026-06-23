@@ -3,6 +3,7 @@
 """
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -12,6 +13,7 @@ class RecordingResponse(BaseModel):
     id: int
     user_id: int
     file_name: str
+    file_url: str = ""
     duration_seconds: int | None = None
     transcript: str | None = None
     analysis_result: dict | None = None
@@ -20,6 +22,28 @@ class RecordingResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> "RecordingResponse":
+        """从 ORM 模型构造时自动计算 file_url"""
+        from app.config import BASE_DIR
+        instance = super().model_validate(obj, **kwargs)
+        # 从 file_path 构造可访问的 URL
+        # file_path 形如 backend/uploads/recordings/2026/06/uuid.webm
+        # 静态挂载 /uploads → backend/uploads
+        if hasattr(obj, 'file_path'):
+            file_path = obj.file_path
+            # 去掉 BASE_DIR 前缀，构造 /uploads/... 路径
+            base_dir_str = str(BASE_DIR.resolve())
+            if file_path.startswith(base_dir_str):
+                rel = file_path[len(base_dir_str):].lstrip('/').lstrip('\\')
+            else:
+                # 备用：从 uploads 子目录提取
+                rel = file_path
+            # Windows 路径转 URL
+            rel = rel.replace('\\', '/')
+            instance.file_url = f"/{rel}"
+        return instance
 
 
 class RecordingAnalysisResponse(BaseModel):
