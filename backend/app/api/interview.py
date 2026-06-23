@@ -1,19 +1,14 @@
-"""AI 面试接口路由。
-
-调用 InterviewAgent 和 InterviewScoringService 处理面试逻辑。
+"""
+AI 面试接口路由
+使用确定性问题模板和基础评分，保证本地无需外部 LLM 也可运行。
 """
 
 from datetime import datetime
-from io import BytesIO
-from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.agents.interview_agent import InterviewAgent
 from app.api.auth import get_current_user
-from app.config import settings
 from app.database import get_db
 from app.models.interview import InterviewSession, InterviewTurn
 from app.models.user import User
@@ -25,17 +20,35 @@ from app.schemas.interview import (
     InterviewSessionDetailResponse,
     InterviewSessionResponse,
 )
-from app.services.interview_scoring_service import InterviewScoringService
 
 router = APIRouter(prefix="/api/v1/interview", tags=["AI面试"])
 
-# 初始化 agent 和 service
-interview_agent = InterviewAgent()
-scoring_service = InterviewScoringService()
+QUESTION_TEMPLATES = {
+    "technical": [
+        "请介绍你在{position}方向最有代表性的项目，以及你承担的核心职责。",
+        "在{position}工作中遇到复杂问题时，你通常如何定位原因并验证解决方案？",
+        "请结合实例说明你如何保证交付质量，并处理性能、稳定性或可维护性问题。",
+        "如果需要你从零设计一个与{position}相关的功能，你会如何拆解需求和制定方案？",
+        "请谈谈你近期学习的一项与{position}相关的新技术，以及它适合解决什么问题。",
+    ],
+    "behavioral": [
+        "请介绍一次你主动推动团队目标达成的经历。",
+        "请描述一次你与团队成员意见不一致的情况，以及你如何处理。",
+        "请分享一次你面对紧迫期限时安排优先级的经历。",
+        "请说明一次失败或失误给你带来的经验。",
+        "你为什么希望从事{position}相关工作，未来的成长目标是什么？",
+    ],
+    "comprehensive": [
+        "请做一个简短的自我介绍，并说明你与{position}岗位的匹配点。",
+        "请介绍一个最能体现你解决问题能力的项目经历。",
+        "面对不熟悉的任务时，你会如何快速学习并交付结果？",
+        "请描述你如何与团队协作并保证信息同步。",
+        "你对{position}岗位的核心能力有哪些理解？",
+    ],
+}
 
 
 def _get_session(db: Session, session_id: int, user_id: int) -> InterviewSession:
-    """获取面试会话"""
     session = db.query(InterviewSession).filter(
         InterviewSession.id == session_id,
         InterviewSession.user_id == user_id,
@@ -45,110 +58,123 @@ def _get_session(db: Session, session_id: int, user_id: int) -> InterviewSession
     return session
 
 
-def _create_turn(db: Session, session: InterviewSession, question_index: int) -> InterviewTurn:
-    """创建面试题目"""
-    question_info = interview_agent.generate_question(
-        target_position=session.target_position,
-        interview_type=session.interview_type,
-        difficulty=session.difficulty,
-        question_index=question_index,
+def _generate_question(session: InterviewSession, question_index: int) -> str:
+    templates = QUESTION_TEMPLATES.get(
+        session.interview_type,
+        QUESTION_TEMPLATES["comprehensive"],
     )
+    template = templates[(question_index - 1) % len(templates)]
+    difficulty_label = {"easy": "基础", "medium": "进阶", "hard": "深入"}.get(
+        session.difficulty,
+        "进阶",
+    )
+    return f"第 {question_index} 题（{difficulty_label}）：{template.format(position=session.target_position)}"
+
+
+def _create_turn(db: Session, session: InterviewSession, question_index: int) -> InterviewTurn:
     turn = InterviewTurn(
         session_id=session.id,
         question_index=question_index,
-        question=question_info["question"],
+        question=_generate_question(session, question_index),
     )
     db.add(turn)
     db.flush()
     return turn
 
 
+def _score_answer(request: InterviewAnswerRequest) -> tuple[float, str, str]:
+    answer = (request.answer_text or "").strip()
+    if answer:
+        length = len(answer)
+        if length < 20:
+            score = 50.0
+        elif length < 60:
+            score = 65.0
+        elif length < 150:
+            score = 78.0
+        else:
+            score = 86.0
+
+        structure_markers = ("首先", "其次", "最后", "例如", "因此", "结果", "第一", "第二")
+        score += min(sum(marker in answer for marker in structure_markers) * 2, 8)
+    else:
+        score = 65.0
+
+    duration = request.answer_duration_seconds
+    if duration is not None:
+        if 30 <= duration <= 180:
+            score += 4
+        elif duration < 10:
+            score -= 5
+
+    score = round(max(0.0, min(score, 100.0)), 2)
+    if score >= 85:
+        feedback = "回答内容充分，结构清晰，并体现了较好的岗位理解。"
+        suggestion = "继续补充可量化结果，让优势更有说服力。"
+    elif score >= 70:
+        feedback = "回答覆盖了主要信息，具备一定条理性。"
+        suggestion = "建议使用具体案例，并说明你的行动和最终结果。"
+    else:
+        feedback = "回答较为简略，关键信息和论证还不够完整。"
+        suggestion = "建议按背景、任务、行动、结果的结构组织回答。"
+    return score, feedback, suggestion
+
+
+def _build_report(session: InterviewSession) -> dict:
+    answered_turns = [turn for turn in session.turns if turn.answered_at is not None]
+    scores = [float(turn.score or 0) for turn in answered_turns]
+    total_score = round(sum(scores) / len(scores), 2) if scores else 0.0
+
+    if total_score >= 85:
+        summary = "整体表现优秀，回答完整且具有较强的岗位匹配度。"
+    elif total_score >= 70:
+        summary = "整体表现良好，基础能力较扎实，部分回答仍可进一步具体化。"
+    else:
+        summary = "整体表现仍有提升空间，建议加强回答结构和案例细节。"
+
+    suggestions = list(dict.fromkeys(
+        turn.suggestion for turn in answered_turns if turn.suggestion
+    ))
+    if not suggestions:
+        suggestions = ["建议完成更多题目，并使用具体案例展示能力。"]
+
+    return {
+        "session_id": session.id,
+        "total_score": total_score,
+        "status": session.status,
+        "summary": summary,
+        "turn_performance": [
+            {
+                "question_index": turn.question_index,
+                "question": turn.question,
+                "score": float(turn.score or 0),
+                "feedback": turn.feedback or "",
+                "suggestion": turn.suggestion or "",
+            }
+            for turn in answered_turns
+        ],
+        "suggestions": suggestions,
+        "generated_at": datetime.now(),
+    }
+
+
 def _save_report(db: Session, session: InterviewSession) -> InterviewReportResponse:
-    """生成并保存面试报告"""
-    report = scoring_service.generate_report(session)
+    report = _build_report(session)
     session.total_score = report["total_score"]
-    session.report = {**report, "generated_at": report["generated_at"].isoformat()}
+    session.report = {
+        **report,
+        "generated_at": report["generated_at"].isoformat(),
+    }
     db.commit()
     db.refresh(session)
     return InterviewReportResponse.model_validate(report)
 
 
-def _write_docx_report(session: InterviewSession, report: dict) -> BytesIO:
-    """生成 Word 格式面试报告"""
-    from docx import Document
-    from docx.oxml.ns import qn
-    from docx.shared import Pt
-
-    document = Document()
-    for style_name in ["Normal", "Title", "Heading 1", "Heading 2", "Heading 3"]:
-        style = document.styles[style_name]
-        style.font.name = "Times New Roman"
-        style._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
-        style.font.size = Pt(12 if style_name == "Normal" else 14)
-
-    document.add_heading(f"{session.title} - 面试评估报告", level=0)
-    document.add_paragraph(f"目标岗位：{session.target_position}")
-    document.add_paragraph(f"面试类型：{session.interview_type}    难度：{session.difficulty}")
-    document.add_paragraph(f"综合评分：{report.get('total_score', 0)}/100")
-    document.add_paragraph(f"生成时间：{report.get('generated_at')}")
-
-    document.add_heading("一、评分依据", level=1)
-    document.add_paragraph(report.get("score_basis") or "")
-
-    document.add_heading("二、总体评价", level=1)
-    document.add_paragraph(report.get("summary") or "")
-
-    document.add_heading("三、维度得分", level=1)
-    table = document.add_table(rows=1, cols=3)
-    table.style = "Table Grid"
-    hdr = table.rows[0].cells
-    hdr[0].text = "评分维度"
-    hdr[1].text = "得分"
-    hdr[2].text = "满分"
-    for name, score in (report.get("dimension_scores") or {}).items():
-        row = table.add_row().cells
-        row[0].text = str(name)
-        row[1].text = str(score)
-        row[2].text = str(scoring_service.DIMENSIONS.get(name, ""))
-
-    document.add_heading("四、逐题分析", level=1)
-    for turn in report.get("turn_performance") or []:
-        document.add_heading(f"第 {turn.get('question_index')} 题：{turn.get('score')}/100", level=2)
-        document.add_paragraph(f"题目：{turn.get('question')}")
-        document.add_paragraph(f"回答：{turn.get('answer') or '未记录'}")
-        duration = turn.get("answer_duration_seconds")
-        document.add_paragraph(f"回答时长：{duration if duration is not None else '未记录'} 秒")
-        document.add_paragraph(f"评价：{turn.get('feedback')}")
-        document.add_paragraph("评分依据：")
-        for item in turn.get("evidence") or []:
-            document.add_paragraph(str(item), style="List Bullet")
-        document.add_paragraph("扣分点：")
-        for item in turn.get("missing_points") or []:
-            document.add_paragraph(str(item), style="List Bullet")
-        document.add_paragraph(f"改进建议：{turn.get('suggestion')}")
-
-    document.add_heading("五、优势与不足", level=1)
-    document.add_paragraph("优势：")
-    for item in report.get("strengths") or []:
-        document.add_paragraph(str(item), style="List Bullet")
-    document.add_paragraph("不足：")
-    for item in report.get("weaknesses") or []:
-        document.add_paragraph(str(item), style="List Bullet")
-
-    document.add_heading("六、改进建议与训练计划", level=1)
-    for item in report.get("suggestions") or []:
-        document.add_paragraph(str(item), style="List Bullet")
-    document.add_paragraph("训练计划：")
-    for item in report.get("action_plan") or []:
-        document.add_paragraph(str(item), style="List Number")
-
-    output = BytesIO()
-    document.save(output)
-    output.seek(0)
-    return output
-
-
-@router.post("/sessions", response_model=APIResponse[InterviewSessionResponse], summary="创建面试会话")
+@router.post(
+    "/sessions",
+    response_model=APIResponse[InterviewSessionResponse],
+    summary="创建面试会话",
+)
 async def create_session(
     request: InterviewSessionCreateRequest,
     current_user: User = Depends(get_current_user),
@@ -156,7 +182,7 @@ async def create_session(
 ):
     session = InterviewSession(
         user_id=current_user.id,
-        title=request.title or f"{request.target_position} AI面试",
+        title=request.title or f"{request.target_position} AI 面试",
         target_position=request.target_position,
         interview_type=request.interview_type,
         difficulty=request.difficulty,
@@ -169,7 +195,11 @@ async def create_session(
     return APIResponse(data=InterviewSessionResponse.model_validate(session), message="面试会话创建成功")
 
 
-@router.get("/sessions", response_model=APIResponse[PaginatedResponse[InterviewSessionResponse]], summary="获取面试会话列表")
+@router.get(
+    "/sessions",
+    response_model=APIResponse[PaginatedResponse[InterviewSessionResponse]],
+    summary="获取面试会话列表",
+)
 async def list_sessions(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
@@ -194,7 +224,11 @@ async def list_sessions(
     )
 
 
-@router.get("/sessions/{session_id}", response_model=APIResponse[InterviewSessionDetailResponse], summary="获取面试会话详情")
+@router.get(
+    "/sessions/{session_id}",
+    response_model=APIResponse[InterviewSessionDetailResponse],
+    summary="获取面试会话详情",
+)
 async def get_session_detail(
     session_id: int,
     current_user: User = Depends(get_current_user),
@@ -204,7 +238,11 @@ async def get_session_detail(
     return APIResponse(data=InterviewSessionDetailResponse.model_validate(session))
 
 
-@router.post("/sessions/{session_id}/start", response_model=APIResponse[InterviewSessionDetailResponse], summary="开始面试")
+@router.post(
+    "/sessions/{session_id}/start",
+    response_model=APIResponse[InterviewSessionDetailResponse],
+    summary="开始面试",
+)
 async def start_session(
     session_id: int,
     current_user: User = Depends(get_current_user),
@@ -226,7 +264,11 @@ async def start_session(
     return APIResponse(data=InterviewSessionDetailResponse.model_validate(session), message="面试已开始")
 
 
-@router.post("/sessions/{session_id}/answer", response_model=APIResponse[InterviewSessionDetailResponse], summary="提交当前问题回答")
+@router.post(
+    "/sessions/{session_id}/answer",
+    response_model=APIResponse[InterviewSessionDetailResponse],
+    summary="提交当前问题回答",
+)
 async def answer_session(
     session_id: int,
     request: InterviewAnswerRequest,
@@ -241,19 +283,14 @@ async def answer_session(
     if not turn:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前没有待回答的问题")
 
-    result = scoring_service.score(
-        session=session,
-        turn=turn,
-        answer_text=request.answer_text or "",
-        answer_duration_seconds=request.answer_duration_seconds,
-    )
+    score, feedback, suggestion = _score_answer(request)
     turn.answer_text = request.answer_text.strip() if request.answer_text else None
     turn.answer_audio_url = request.answer_audio_url
     turn.answer_duration_seconds = request.answer_duration_seconds
     turn.answered_at = datetime.now()
-    turn.score = result["score"]
-    turn.feedback = result["feedback"]
-    turn.suggestion = result["suggestion"]
+    turn.score = score
+    turn.feedback = feedback
+    turn.suggestion = suggestion
 
     if turn.question_index < session.question_count:
         _create_turn(db, session, turn.question_index + 1)
@@ -263,7 +300,11 @@ async def answer_session(
     return APIResponse(data=InterviewSessionDetailResponse.model_validate(session), message="回答提交成功")
 
 
-@router.post("/sessions/{session_id}/finish", response_model=APIResponse[InterviewReportResponse], summary="结束面试")
+@router.post(
+    "/sessions/{session_id}/finish",
+    response_model=APIResponse[InterviewReportResponse],
+    summary="结束面试",
+)
 async def finish_session(
     session_id: int,
     current_user: User = Depends(get_current_user),
@@ -281,7 +322,11 @@ async def finish_session(
     return APIResponse(data=report, message="面试已结束")
 
 
-@router.get("/sessions/{session_id}/report", response_model=APIResponse[InterviewReportResponse], summary="获取面试报告")
+@router.get(
+    "/sessions/{session_id}/report",
+    response_model=APIResponse[InterviewReportResponse],
+    summary="获取面试报告",
+)
 async def get_session_report(
     session_id: int,
     current_user: User = Depends(get_current_user),
@@ -293,23 +338,3 @@ async def get_session_report(
     else:
         report = InterviewReportResponse.model_validate(session.report)
     return APIResponse(data=report)
-
-
-@router.get("/sessions/{session_id}/report.docx", summary="下载 Word 面试报告")
-async def download_session_report_docx(
-    session_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    session = _get_session(db, session_id, current_user.id)
-    if not session.report:
-        report = _save_report(db, session).model_dump()
-    else:
-        report = session.report
-    output = _write_docx_report(session, report)
-    filename = quote(f"{session.title}-面试报告.docx")
-    return StreamingResponse(
-        output,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
-    )
