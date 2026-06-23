@@ -70,6 +70,9 @@ class Conversation(Base):
     agent_logs: Mapped[list["AgentLog"]] = relationship(
         "AgentLog", back_populates="conversation", lazy="selectin", cascade="all, delete-orphan"
     )
+    interview_sessions: Mapped[list["InterviewSession"]] = relationship(
+        "InterviewSession", back_populates="conversation", lazy="selectin"
+    )
 
     def __repr__(self) -> str:
         return f"<Conversation(id={self.id}, title={self.title})>"

@@ -55,6 +55,20 @@ def ensure_schema_compatibility() -> None:
         with engine.begin() as conn:
             conn.execute(text(ddl))
 
+    interview_session_columns = {col["name"] for col in inspector.get_columns("interview_sessions")}
+    if "conversation_id" not in interview_session_columns:
+        dialect = engine.dialect.name
+        if dialect == "mysql":
+            ddl = (
+                "ALTER TABLE interview_sessions "
+                "ADD COLUMN conversation_id INT NULL, "
+                "ADD INDEX ix_interview_sessions_conversation_id (conversation_id)"
+            )
+        else:
+            ddl = "ALTER TABLE interview_sessions ADD COLUMN conversation_id INTEGER NULL"
+        with engine.begin() as conn:
+            conn.execute(text(ddl))
+
     profile_columns = {col["name"] for col in inspector.get_columns("user_profiles")}
     profile_extra_columns = {
         "education_level": "VARCHAR(64)",

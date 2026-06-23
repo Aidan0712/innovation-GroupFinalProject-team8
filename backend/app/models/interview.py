@@ -23,6 +23,13 @@ class InterviewSession(Base):
         index=True,
         comment="所属用户ID",
     )
+    conversation_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("conversations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="关联对话ID",
+    )
     title: Mapped[str] = mapped_column(String(256), nullable=False, comment="面试标题")
     target_position: Mapped[str] = mapped_column(
         String(128), nullable=False, comment="目标岗位"
@@ -59,6 +66,9 @@ class InterviewSession(Base):
     )
 
     user: Mapped["User"] = relationship("User", back_populates="interview_sessions")
+    conversation: Mapped["Conversation | None"] = relationship(
+        "Conversation", back_populates="interview_sessions"
+    )
     turns: Mapped[list["InterviewTurn"]] = relationship(
         "InterviewTurn",
         back_populates="session",

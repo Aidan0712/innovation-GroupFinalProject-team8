@@ -1,23 +1,31 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { useChatStore } from '@/stores/chat'
 import AppHeader from '@/components/AppHeader.vue'
 import Sidebar from '@/components/Sidebar.vue'
 import {
   answerInterviewSessionApi,
   createInterviewSessionApi,
   finishInterviewSessionApi,
+  getInterviewReportApi,
   getInterviewReportDownloadUrl,
+  getInterviewSessionDetailApi,
   type InterviewReport,
   type InterviewSession,
   type InterviewTurn,
   startInterviewSessionApi,
 } from '@/api/interview'
 
+const route = useRoute()
+const router = useRouter()
+const chatStore = useChatStore()
 const loading = ref(false)
 const downloading = ref(false)
 const session = ref<InterviewSession | null>(null)
 const report = ref<InterviewReport | null>(null)
+const selectedHistoryId = ref<number | null>(null)
 const answerText = ref('')
 const answerStartedAt = ref<number | null>(null)
 
@@ -49,17 +57,108 @@ const dimensionMax: Record<string, number> = {
   时间控制: 10,
 }
 
-const activeTurn = computed<InterviewTurn | null>(() => {
-  const turns = session.value?.turns || []
-  return turns.find(item => !item.answered_at) || null
+const currentConversationId = computed<number | undefined>(() => {
+  const queryId = Number(route.query.conversation_id)
+  const storeId = Number(chatStore.currentConversationId)
+  if (Number.isFinite(queryId) && queryId > 0) return queryId
+  if (Number.isFinite(storeId) && storeId > 0) return storeId
+  return undefined
 })
 
 const answeredTurns = computed(() => {
   return (session.value?.turns || []).filter(item => item.answered_at)
 })
 
+const activeTurn = computed<InterviewTurn | null>(() => {
+  if (session.value?.status === 'finished') return null
+  const turns = session.value?.turns || []
+  return turns.find(item => !item.answered_at) || null
+})
+
+const isAllAnswered = computed(() => {
+  return !!session.value && answeredTurns.value.length >= session.value.question_count
+})
+
+const finishTitle = computed(() => {
+  if (!session.value) return ''
+  if (session.value.status === 'finished') {
+    return isAllAnswered.value ? '题目已完成' : '面试已提前结束'
+  }
+  return '题目已完成'
+})
+
+const finishTip = computed(() => {
+  if (!session.value) return ''
+  if (session.value.status === 'finished') {
+    return isAllAnswered.value
+      ? '本次面试已完成，下面可以查看综合评分、逐题依据和改进计划。'
+      : '本次面试已提前结束，未回答题目会按 0 分计入综合评分。'
+  }
+  return '点击生成报告，查看综合评分、维度分析、逐题依据和改进计划。'
+})
+
 function resetAnswerTimer() {
   answerStartedAt.value = Date.now()
+}
+
+function goBackToChat() {
+  router.push('/')
+}
+
+function resetInterview() {
+  session.value = null
+  report.value = null
+  selectedHistoryId.value = null
+  answerText.value = ''
+  answerStartedAt.value = null
+}
+
+function formatStatus(value: string) {
+  if (value === 'finished') return '已结束'
+  if (value === 'in_progress') return '进行中'
+  return '未开始'
+}
+
+async function ensureConversationContext() {
+  if (currentConversationId.value) return currentConversationId.value
+  await chatStore.createConversation('AI面试', 'interview')
+  const id = Number(chatStore.currentConversationId)
+  if (Number.isFinite(id) && id > 0) {
+    await router.replace({
+      path: '/interview',
+      query: { conversation_id: String(id) },
+    })
+    return id
+  }
+  return undefined
+}
+
+function notifyInterviewHistoryUpdated() {
+  window.dispatchEvent(new Event('interview-history-updated'))
+}
+
+async function openHistoryById(sessionId: number) {
+  if (!Number.isFinite(sessionId) || sessionId <= 0) return
+  loading.value = true
+  selectedHistoryId.value = sessionId
+  answerText.value = ''
+  try {
+    const detail = await getInterviewSessionDetailApi(sessionId)
+    session.value = detail.data
+    report.value = detail.data.report || null
+    if (detail.data.status === 'finished') {
+      try {
+        const reportRes = await getInterviewReportApi(sessionId)
+        report.value = reportRes.data
+      } catch {
+        // The detail response still carries the saved report when it exists.
+      }
+    } else {
+      resetAnswerTimer()
+    }
+  } finally {
+    loading.value = false
+  }
 }
 
 async function createAndStartInterview() {
@@ -74,6 +173,7 @@ async function createAndStartInterview() {
   try {
     const created = await createInterviewSessionApi({
       title: `${form.target_position} AI面试`,
+      conversation_id: await ensureConversationContext(),
       target_position: form.target_position.trim(),
       interview_type: form.interview_type,
       difficulty: form.difficulty,
@@ -82,7 +182,19 @@ async function createAndStartInterview() {
     })
     const started = await startInterviewSessionApi(created.data.id)
     session.value = started.data
+    selectedHistoryId.value = started.data.id
     resetAnswerTimer()
+    const conversationId = started.data.conversation_id || currentConversationId.value
+    if (conversationId) {
+      await router.replace({
+        path: '/interview',
+        query: {
+          conversation_id: String(conversationId),
+          session_id: String(started.data.id),
+        },
+      })
+    }
+    notifyInterviewHistoryUpdated()
     ElMessage.success('AI面试已开始')
   } finally {
     loading.value = false
@@ -109,6 +221,7 @@ async function submitAnswer() {
     session.value = res.data
     answerText.value = ''
     resetAnswerTimer()
+    notifyInterviewHistoryUpdated()
     ElMessage.success('回答已提交，评分已生成')
   } finally {
     loading.value = false
@@ -127,6 +240,7 @@ async function finishInterview() {
       total_score: res.data.total_score,
       report: res.data,
     }
+    notifyInterviewHistoryUpdated()
     ElMessage.success('面试报告已生成')
   } finally {
     loading.value = false
@@ -163,6 +277,24 @@ function scoreStatus(score?: number | null) {
   if (score >= 70) return 'warning'
   return 'danger'
 }
+
+watch(
+  () => Number(route.query.session_id) || null,
+  (sessionId) => {
+    if (sessionId && selectedHistoryId.value !== sessionId) {
+      openHistoryById(sessionId)
+    }
+  },
+  { immediate: true },
+)
+
+watch(currentConversationId, () => {
+  if (!route.query.session_id) resetInterview()
+})
+
+onMounted(() => {
+  notifyInterviewHistoryUpdated()
+})
 </script>
 
 <template>
@@ -177,11 +309,14 @@ function scoreStatus(score?: number | null) {
           <div class="panel-title">
             <div>
               <h1>AI面试官</h1>
-              <p>按岗位生成问题，回答后按五个维度评分，结束后生成详细报告并支持 Word 下载。</p>
+              <p>按岗位生成问题，回答后按六个维度评分，结束后生成详细报告并支持 Word 下载。</p>
             </div>
-            <el-button type="primary" :loading="loading" :icon="'VideoPlay'" @click="createAndStartInterview">
-              开始面试
-            </el-button>
+            <div class="panel-actions">
+              <el-button :icon="'Back'" @click="goBackToChat">返回对话</el-button>
+              <el-button type="primary" :loading="loading" :icon="'VideoPlay'" @click="createAndStartInterview">
+                开始面试
+              </el-button>
+            </div>
           </div>
 
           <el-form :model="form" class="setup-form" label-position="top">
@@ -206,7 +341,7 @@ function scoreStatus(score?: number | null) {
               <div>
                 <span class="session-title">{{ session.title }}</span>
                 <el-tag :type="session.status === 'finished' ? 'success' : 'primary'">
-                  {{ session.status === 'finished' ? '已结束' : '进行中' }}
+                  {{ formatStatus(session.status) }}
                 </el-tag>
               </div>
               <span class="session-progress">
@@ -233,18 +368,34 @@ function scoreStatus(score?: number | null) {
                   :icon="'DocumentChecked'"
                   @click="finishInterview"
                 >
-                  结束并生成报告
+                  {{ isAllAnswered ? '结束并生成报告' : '提前结束并生成报告' }}
                 </el-button>
               </div>
             </div>
 
             <div v-else class="finished-box">
               <el-icon :size="42"><CircleCheck /></el-icon>
-              <h2>题目已完成</h2>
-              <p>点击生成报告，查看综合评分、维度分析、逐题依据和改进计划。</p>
-              <el-button type="primary" :loading="loading" :icon="'DocumentChecked'" @click="finishInterview">
-                生成面试报告
-              </el-button>
+              <h2>{{ finishTitle }}</h2>
+              <p>{{ finishTip }}</p>
+              <div class="question-actions">
+                <el-button
+                  v-if="session.status !== 'finished'"
+                  type="primary"
+                  :loading="loading"
+                  :icon="'DocumentChecked'"
+                  @click="finishInterview"
+                >
+                  生成面试报告
+                </el-button>
+                <el-button
+                  v-else
+                  type="primary"
+                  :icon="'VideoPlay'"
+                  @click="resetInterview"
+                >
+                  重新开始面试
+                </el-button>
+              </div>
             </div>
           </div>
 
@@ -271,9 +422,12 @@ function scoreStatus(score?: number | null) {
             <div class="report-summary">
               <div class="report-title-row">
                 <h2>面试报告</h2>
-                <el-button :loading="downloading" :icon="'Download'" @click="downloadReport">
-                  下载 Word
-                </el-button>
+                <div class="panel-actions">
+                  <el-button :icon="'VideoPlay'" @click="resetInterview">重新开始</el-button>
+                  <el-button :loading="downloading" :icon="'Download'" @click="downloadReport">
+                    下载 Word
+                  </el-button>
+                </div>
               </div>
               <p>{{ report.summary }}</p>
               <p class="score-basis">{{ report.score_basis }}</p>
@@ -395,6 +549,13 @@ function scoreStatus(score?: number | null) {
 .setup-panel {
   padding: 20px;
   margin-bottom: 16px;
+}
+
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .panel-title,
@@ -597,7 +758,8 @@ function scoreStatus(score?: number | null) {
     grid-template-columns: 1fr;
   }
 
-  .panel-title {
+  .panel-title,
+  .report-title-row {
     flex-direction: column;
     align-items: stretch;
   }

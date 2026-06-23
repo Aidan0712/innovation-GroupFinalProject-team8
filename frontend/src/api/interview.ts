@@ -3,6 +3,7 @@ import type { APIResponse, PaginatedResponse } from '@/types'
 
 export interface InterviewSessionCreateParams {
   title?: string
+  conversation_id?: number
   target_position: string
   interview_type: 'technical' | 'behavioral' | 'comprehensive'
   difficulty: 'easy' | 'medium' | 'hard'
@@ -31,6 +32,7 @@ export interface InterviewTurn {
 export interface InterviewSession {
   id: number
   title: string
+  conversation_id?: number | null
   target_position: string
   interview_type: string
   difficulty: string
@@ -73,8 +75,12 @@ export function createInterviewSessionApi(data: InterviewSessionCreateParams): P
   return request.post('/v1/interview/sessions', data)
 }
 
-export function getInterviewSessionsApi(params = { page: 1, page_size: 20 }): Promise<APIResponse<PaginatedResponse<InterviewSession>>> {
+export function getInterviewSessionsApi(params: { page: number; page_size: number; conversation_id?: number } = { page: 1, page_size: 20 }): Promise<APIResponse<PaginatedResponse<InterviewSession>>> {
   return request.get('/v1/interview/sessions', { params })
+}
+
+export function getInterviewSessionDetailApi(sessionId: number): Promise<APIResponse<InterviewSession>> {
+  return request.get(`/v1/interview/sessions/${sessionId}`)
 }
 
 export function startInterviewSessionApi(sessionId: number): Promise<APIResponse<InterviewSession>> {

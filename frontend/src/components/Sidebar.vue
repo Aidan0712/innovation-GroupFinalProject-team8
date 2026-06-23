@@ -1,10 +1,11 @@
 ﻿<script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
+import { getInterviewSessionsApi, type InterviewSession } from '@/api/interview'
 import { formatRelativeTime } from '@/utils'
 
 const router = useRouter()
@@ -16,29 +17,99 @@ const appStore = useAppStore()
 const sidebarWidth = computed(() =>
   appStore.sidebarCollapsed ? '64px' : 'var(--sidebar-width)'
 )
+const interviewSessions = ref<InterviewSession[]>([])
+const interviewLoading = ref(false)
+const isInInterview = computed(() => route.path.startsWith('/interview'))
+const selectedInterviewSessionId = computed(() => Number(route.query.session_id) || null)
+const currentInterviewConversationId = computed<number | undefined>(() => {
+  const queryId = Number(route.query.conversation_id)
+  const storeId = Number(chatStore.currentConversationId)
+  if (Number.isFinite(queryId) && queryId > 0) return queryId
+  if (Number.isFinite(storeId) && storeId > 0) return storeId
+  return undefined
+})
 
 async function handleNewChat() {
   try {
     await chatStore.createConversation('新对话', 'general')
+    if (route.path !== '/') {
+      await router.push('/')
+    }
   } catch {
     // Keep the UI quiet; API errors are surfaced elsewhere.
   }
 }
 
-function handleSelectConversation(conversationId: number | string) {
+async function handleSelectConversation(conversationId: number | string) {
   chatStore.switchConversation(conversationId)
+  if (route.path !== '/') {
+    await router.push('/')
+  }
 }
 
 function goToAdmin() {
   router.push('/admin')
 }
 
-function goToInterview() {
-  router.push('/interview')
+function formatInterviewType(value: string) {
+  const map: Record<string, string> = {
+    technical: '技术面试',
+    behavioral: '行为面试',
+    comprehensive: '综合面试',
+  }
+  return map[value] || value
+}
+
+function formatDifficulty(value: string) {
+  const map: Record<string, string> = {
+    easy: '基础',
+    medium: '进阶',
+    hard: '深入',
+  }
+  return map[value] || value
+}
+
+function formatInterviewStatus(value: string) {
+  if (value === 'finished') return '已结束'
+  if (value === 'in_progress') return '进行中'
+  return '未开始'
+}
+
+async function loadInterviewSessions() {
+  if (!isInInterview.value || !currentInterviewConversationId.value) {
+    interviewSessions.value = []
+    return
+  }
+  interviewLoading.value = true
+  try {
+    const res = await getInterviewSessionsApi({
+      page: 1,
+      page_size: 30,
+      conversation_id: currentInterviewConversationId.value,
+    })
+    interviewSessions.value = res.data?.items || (res.data as any)?.data || []
+  } finally {
+    interviewLoading.value = false
+  }
+}
+
+async function handleSelectInterviewSession(item: InterviewSession) {
+  const conversationId = item.conversation_id || currentInterviewConversationId.value
+  if (!conversationId) return
+  await router.push({
+    path: '/interview',
+    query: {
+      conversation_id: String(conversationId),
+      session_id: String(item.id),
+    },
+  })
+}
+
+function handleInterviewHistoryUpdated() {
+  loadInterviewSessions()
 }
 
 const isInAdmin = computed(() => route.path.startsWith('/admin'))
-const isInInterview = computed(() => route.path.startsWith('/interview'))
 
 async function handleDeleteConversation(e: Event, conversationId: number | string) {
   e.stopPropagation()
@@ -63,6 +134,20 @@ function plainPreview(text?: string | null) {
     .replace(/\s+/g, ' ')
     .trim() || '暂无消息'
 }
+
+watch(
+  () => [route.path, route.query.conversation_id, chatStore.currentConversationId],
+  loadInterviewSessions,
+)
+
+onMounted(() => {
+  loadInterviewSessions()
+  window.addEventListener('interview-history-updated', handleInterviewHistoryUpdated)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('interview-history-updated', handleInterviewHistoryUpdated)
+})
 </script>
 
 <template>
@@ -113,19 +198,37 @@ function plainPreview(text?: string | null) {
           </div>
         </div>
       </div>
+
+      <div v-if="isInInterview" class="interview-history-section">
+        <div class="section-title history-section-title">
+          <span>面试历史</span>
+          <el-button text :loading="interviewLoading" :icon="'Refresh'" @click="loadInterviewSessions" />
+        </div>
+
+        <div class="interview-history-list">
+          <div v-if="interviewSessions.length === 0" class="interview-empty">
+            当前对话暂无面试记录
+          </div>
+          <button
+            v-for="item in interviewSessions"
+            :key="item.id"
+            class="interview-history-item"
+            :class="{ active: selectedInterviewSessionId === item.id }"
+            type="button"
+            @click="handleSelectInterviewSession(item)"
+          >
+            <span class="interview-title text-ellipsis">{{ item.title }}</span>
+            <span class="interview-meta text-ellipsis">
+              {{ formatInterviewType(item.interview_type) }} · {{ formatDifficulty(item.difficulty) }} ·
+              {{ formatInterviewStatus(item.status) }}
+            </span>
+            <strong v-if="item.total_score != null">{{ item.total_score }}/100</strong>
+          </button>
+        </div>
+      </div>
     </div>
 
     <div class="sidebar-footer">
-      <div
-        v-if="!appStore.sidebarCollapsed"
-        class="footer-item"
-        :class="{ active: isInInterview }"
-        @click="goToInterview"
-      >
-        <el-icon :size="18"><UserFilled /></el-icon>
-        <span>AI面试</span>
-      </div>
-
       <div
         v-if="authStore.isAdmin && !appStore.sidebarCollapsed"
         class="footer-item"
@@ -195,6 +298,67 @@ function plainPreview(text?: string | null) {
   flex: 1;
   overflow-y: auto;
   padding: 0 var(--spacing-sm);
+}
+
+.interview-history-section {
+  border-top: 1px solid var(--color-border-light);
+  padding-top: 4px;
+  max-height: 42%;
+  min-height: 132px;
+  display: flex;
+  flex-direction: column;
+}
+
+.history-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.interview-history-list {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--spacing-sm) var(--spacing-sm);
+}
+
+.interview-empty {
+  padding: 12px var(--spacing-sm);
+  color: var(--color-text-placeholder);
+  font-size: var(--font-xs);
+}
+
+.interview-history-item {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  display: grid;
+  gap: 4px;
+  margin-bottom: 2px;
+  padding: 9px 11px;
+  text-align: left;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.interview-history-item:hover,
+.interview-history-item.active {
+  background: var(--color-primary-lighter);
+}
+
+.interview-title {
+  font-size: var(--font-sm);
+  font-weight: 600;
+}
+
+.interview-meta {
+  color: var(--color-text-secondary);
+  font-size: var(--font-xs);
+}
+
+.interview-history-item strong {
+  font-size: 12px;
 }
 
 .empty-state {
