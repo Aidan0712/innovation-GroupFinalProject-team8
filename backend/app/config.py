@@ -78,7 +78,16 @@ class Settings(BaseSettings):
     # ── 文件上传配置 ──
     UPLOAD_DIR: str = str(BASE_DIR / "uploads")
     MAX_UPLOAD_SIZE: int = 50 * 1024 * 1024  # 50MB
-    ALLOWED_AUDIO_TYPES: list[str] = ["audio/wav", "audio/mp3", "audio/m4a", "audio/webm"]
+    ALLOWED_AUDIO_TYPES: list[str] = [
+        "audio/wav",
+        "audio/mp3",
+        "audio/m4a",
+        "audio/x-m4a",
+        "audio/webm",
+        "audio/mp4",
+        "audio/ogg",
+        "audio/aac",
+    ]
     ALLOWED_RESUME_TYPES: list[str] = [
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx

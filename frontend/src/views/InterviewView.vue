@@ -5,6 +5,8 @@ import { ElMessage } from 'element-plus'
 import { useChatStore } from '@/stores/chat'
 import AppHeader from '@/components/AppHeader.vue'
 import Sidebar from '@/components/Sidebar.vue'
+import InterviewAnswerBar from '@/components/interview/InterviewAnswerBar.vue'
+import type { VoiceRecorderResult } from '@/composables/useVoiceRecorder'
 import {
   answerInterviewSessionApi,
   createInterviewSessionApi,
@@ -12,21 +14,22 @@ import {
   getInterviewReportApi,
   getInterviewReportDownloadUrl,
   getInterviewSessionDetailApi,
+  startInterviewSessionApi,
+  type InterviewAnswerParams,
   type InterviewReport,
   type InterviewSession,
   type InterviewTurn,
-  startInterviewSessionApi,
 } from '@/api/interview'
 
 const route = useRoute()
 const router = useRouter()
 const chatStore = useChatStore()
+
 const loading = ref(false)
 const downloading = ref(false)
 const session = ref<InterviewSession | null>(null)
 const report = ref<InterviewReport | null>(null)
 const selectedHistoryId = ref<number | null>(null)
-const answerText = ref('')
 const answerStartedAt = ref<number | null>(null)
 
 const form = reactive({
@@ -66,36 +69,20 @@ const currentConversationId = computed<number | undefined>(() => {
 })
 
 const answeredTurns = computed(() => {
-  return (session.value?.turns || []).filter(item => item.answered_at)
+  return (session.value?.turns || []).filter((item) => item.answered_at)
 })
 
 const activeTurn = computed<InterviewTurn | null>(() => {
   if (session.value?.status === 'finished') return null
   const turns = session.value?.turns || []
-  return turns.find(item => !item.answered_at) || null
+  return turns.find((item) => !item.answered_at) || null
 })
 
 const isAllAnswered = computed(() => {
   return !!session.value && answeredTurns.value.length >= session.value.question_count
 })
 
-const finishTitle = computed(() => {
-  if (!session.value) return ''
-  if (session.value.status === 'finished') {
-    return isAllAnswered.value ? '题目已完成' : '面试已提前结束'
-  }
-  return '题目已完成'
-})
-
-const finishTip = computed(() => {
-  if (!session.value) return ''
-  if (session.value.status === 'finished') {
-    return isAllAnswered.value
-      ? '本次面试已完成，下面可以查看综合评分、逐题依据和改进计划。'
-      : '本次面试已提前结束，未回答题目会按 0 分计入综合评分。'
-  }
-  return '点击生成报告，查看综合评分、维度分析、逐题依据和改进计划。'
-})
+const reportReady = computed(() => session.value?.status === 'finished' && !!report.value)
 
 function resetAnswerTimer() {
   answerStartedAt.value = Date.now()
@@ -109,7 +96,6 @@ function resetInterview() {
   session.value = null
   report.value = null
   selectedHistoryId.value = null
-  answerText.value = ''
   answerStartedAt.value = null
 }
 
@@ -117,6 +103,17 @@ function formatStatus(value: string) {
   if (value === 'finished') return '已结束'
   if (value === 'in_progress') return '进行中'
   return '未开始'
+}
+
+function scoreStatus(score?: number | null) {
+  if (score == null) return 'info'
+  if (score >= 85) return 'success'
+  if (score >= 70) return 'warning'
+  return 'danger'
+}
+
+function notifyInterviewHistoryUpdated() {
+  window.dispatchEvent(new Event('interview-history-updated'))
 }
 
 async function ensureConversationContext() {
@@ -133,15 +130,10 @@ async function ensureConversationContext() {
   return undefined
 }
 
-function notifyInterviewHistoryUpdated() {
-  window.dispatchEvent(new Event('interview-history-updated'))
-}
-
 async function openHistoryById(sessionId: number) {
   if (!Number.isFinite(sessionId) || sessionId <= 0) return
   loading.value = true
   selectedHistoryId.value = sessionId
-  answerText.value = ''
   try {
     const detail = await getInterviewSessionDetailApi(sessionId)
     session.value = detail.data
@@ -151,7 +143,7 @@ async function openHistoryById(sessionId: number) {
         const reportRes = await getInterviewReportApi(sessionId)
         report.value = reportRes.data
       } catch {
-        // The detail response still carries the saved report when it exists.
+        report.value = detail.data.report || null
       }
     } else {
       resetAnswerTimer()
@@ -169,7 +161,6 @@ async function createAndStartInterview() {
 
   loading.value = true
   report.value = null
-  answerText.value = ''
   try {
     const created = await createInterviewSessionApi({
       title: `${form.target_position} AI面试`,
@@ -178,7 +169,7 @@ async function createAndStartInterview() {
       interview_type: form.interview_type,
       difficulty: form.difficulty,
       question_count: form.question_count,
-      answer_mode: 'text',
+      answer_mode: 'mixed',
     })
     const started = await startInterviewSessionApi(created.data.id)
     session.value = started.data
@@ -195,37 +186,63 @@ async function createAndStartInterview() {
       })
     }
     notifyInterviewHistoryUpdated()
-    ElMessage.success('AI面试已开始')
+    ElMessage.success('AI 面试已开始')
   } finally {
     loading.value = false
   }
 }
 
-async function submitAnswer() {
+async function submitAnswerPayload(payload: InterviewAnswerParams, successMessage: string) {
   if (!session.value || !activeTurn.value) return
-  if (!answerText.value.trim()) {
-    ElMessage.warning('请输入回答内容')
-    return
-  }
 
   const duration = answerStartedAt.value
     ? Math.max(1, Math.round((Date.now() - answerStartedAt.value) / 1000))
-    : undefined
+    : payload.answer_duration_seconds
 
   loading.value = true
   try {
     const res = await answerInterviewSessionApi(session.value.id, {
-      answer_text: answerText.value.trim(),
+      ...payload,
       answer_duration_seconds: duration,
     })
     session.value = res.data
-    answerText.value = ''
     resetAnswerTimer()
     notifyInterviewHistoryUpdated()
-    ElMessage.success('回答已提交，评分已生成')
+    ElMessage.success(successMessage)
   } finally {
     loading.value = false
   }
+}
+
+async function handleTextAnswer(text: string) {
+  await submitAnswerPayload({ answer_text: text }, '文字回答已提交，评分已更新')
+}
+
+async function handleVoiceResult(result: VoiceRecorderResult) {
+  const payload: InterviewAnswerParams = {
+    answer_duration_seconds: result.duration,
+  }
+
+  if (result.extra.transcript) {
+    payload.answer_text = result.extra.transcript
+  }
+  if (result.extra.audio_url) {
+    payload.answer_audio_url = result.extra.audio_url
+  }
+  if (result.extra.recording_id > 0) {
+    payload.recording_id = result.extra.recording_id
+  }
+
+  if (!payload.answer_text && !payload.answer_audio_url && !payload.recording_id) {
+    ElMessage.warning('本次录音未能成功上传，请重试一次')
+    return
+  }
+
+  await submitAnswerPayload(payload, '语音回答已提交，评分已更新')
+}
+
+function handleVoiceError(message: string) {
+  ElMessage.warning(message)
 }
 
 async function finishInterview() {
@@ -271,13 +288,6 @@ async function downloadReport() {
   }
 }
 
-function scoreStatus(score?: number | null) {
-  if (score == null) return 'info'
-  if (score >= 85) return 'success'
-  if (score >= 70) return 'warning'
-  return 'danger'
-}
-
 watch(
   () => Number(route.query.session_id) || null,
   (sessionId) => {
@@ -289,7 +299,9 @@ watch(
 )
 
 watch(currentConversationId, () => {
-  if (!route.query.session_id) resetInterview()
+  if (!route.query.session_id) {
+    resetInterview()
+  }
 })
 
 onMounted(() => {
@@ -308,8 +320,8 @@ onMounted(() => {
         <section class="setup-panel">
           <div class="panel-title">
             <div>
-              <h1>AI面试官</h1>
-              <p>按岗位生成问题，回答后按六个维度评分，结束后生成详细报告并支持 Word 下载。</p>
+              <h1>AI 面试室</h1>
+              <p>按岗位生成问题，支持文字和语音混合回答，结束后自动生成详细报告。</p>
             </div>
             <div class="panel-actions">
               <el-button :icon="'Back'" @click="goBackToChat">返回对话</el-button>
@@ -321,7 +333,7 @@ onMounted(() => {
 
           <el-form :model="form" class="setup-form" label-position="top">
             <el-form-item label="目标岗位">
-              <el-input v-model="form.target_position" placeholder="例如：Java后端开发工程师" />
+              <el-input v-model="form.target_position" placeholder="例如：前端开发工程师" />
             </el-form-item>
             <el-form-item label="面试类型">
               <el-segmented v-model="form.interview_type" :options="interviewTypeOptions" />
@@ -338,30 +350,28 @@ onMounted(() => {
         <section v-if="session" class="workspace">
           <div class="question-panel">
             <div class="session-bar">
-              <div>
+              <div class="session-bar-main">
                 <span class="session-title">{{ session.title }}</span>
                 <el-tag :type="session.status === 'finished' ? 'success' : 'primary'">
                   {{ formatStatus(session.status) }}
                 </el-tag>
               </div>
-              <span class="session-progress">
-                {{ answeredTurns.length }} / {{ session.question_count }}
-              </span>
+              <span class="session-progress">{{ answeredTurns.length }} / {{ session.question_count }}</span>
             </div>
 
             <div v-if="activeTurn" class="question-box">
               <div class="question-index">第 {{ activeTurn.question_index }} 题</div>
-              <p>{{ activeTurn.question }}</p>
-              <el-input
-                v-model="answerText"
-                type="textarea"
-                :autosize="{ minRows: 7, maxRows: 12 }"
-                placeholder="建议按 STAR 结构回答：背景、任务、行动、结果，并补充技术细节和量化成果。"
+              <p class="question-text">{{ activeTurn.question }}</p>
+
+              <InterviewAnswerBar
+                :disabled="loading"
+                :loading="loading"
+                @send-text="handleTextAnswer"
+                @voice-result="handleVoiceResult"
+                @voice-error="handleVoiceError"
               />
+
               <div class="question-actions">
-                <el-button :loading="loading" type="primary" :icon="'Check'" @click="submitAnswer">
-                  提交回答并评分
-                </el-button>
                 <el-button
                   :disabled="answeredTurns.length === 0"
                   :loading="loading"
@@ -375,8 +385,14 @@ onMounted(() => {
 
             <div v-else class="finished-box">
               <el-icon :size="42"><CircleCheck /></el-icon>
-              <h2>{{ finishTitle }}</h2>
-              <p>{{ finishTip }}</p>
+              <h2>{{ reportReady ? '面试已结束' : '题目已完成' }}</h2>
+              <p>
+                {{
+                  reportReady
+                    ? '你已经完成本轮 AI 面试，下面可以查看综合评分和逐题反馈。'
+                    : '所有题目已作答完成，点击下方按钮生成最终报告。'
+                }}
+              </p>
               <div class="question-actions">
                 <el-button
                   v-if="session.status !== 'finished'"
@@ -393,19 +409,31 @@ onMounted(() => {
                   :icon="'VideoPlay'"
                   @click="resetInterview"
                 >
-                  重新开始面试
+                  重新开始
                 </el-button>
               </div>
             </div>
           </div>
 
           <div class="result-panel">
-            <h2>评分记录</h2>
-            <div v-if="answeredTurns.length === 0" class="empty-result">提交回答后，这里会显示每题评分和反馈。</div>
+            <div class="result-panel-header">
+              <h2>评分记录</h2>
+              <span class="result-panel-tip">每次提交都会在这里追加评分</span>
+            </div>
+
+            <div v-if="answeredTurns.length === 0" class="empty-result">
+              提交第一题后，这里会显示逐题得分、反馈和改进建议。
+            </div>
+
             <div v-for="turn in answeredTurns" :key="turn.id" class="turn-result">
               <div class="turn-head">
                 <span>第 {{ turn.question_index }} 题</span>
                 <el-tag :type="scoreStatus(turn.score)">{{ turn.score }}/100</el-tag>
+              </div>
+              <p class="turn-answer" v-if="turn.answer_text">{{ turn.answer_text }}</p>
+              <div class="turn-meta" v-if="turn.answer_duration_seconds || turn.answer_audio_url">
+                <span v-if="turn.answer_duration_seconds">回答时长 {{ turn.answer_duration_seconds }} 秒</span>
+                <span v-if="turn.answer_audio_url">含语音作答</span>
               </div>
               <p class="feedback">{{ turn.feedback }}</p>
               <p class="suggestion">{{ turn.suggestion }}</p>
@@ -419,6 +447,7 @@ onMounted(() => {
               <span>综合评分</span>
               <strong>{{ report.total_score }}</strong>
             </div>
+
             <div class="report-summary">
               <div class="report-title-row">
                 <h2>面试报告</h2>
@@ -471,11 +500,11 @@ onMounted(() => {
                 <el-tag :type="scoreStatus(item.score)">{{ item.score }}/100</el-tag>
               </div>
               <p class="question-text">{{ item.question }}</p>
-              <p class="time-text">
-                回答时长：{{ item.answer_duration_seconds ?? '未记录' }} 秒
-              </p>
+              <p class="time-text">回答时长：{{ item.answer_duration_seconds ?? '未记录' }} 秒</p>
               <div v-if="item.dimensions" class="mini-dimensions">
-                <span v-for="(value, name) in item.dimensions" :key="name">{{ name }} {{ value }}/{{ dimensionMax[name] }}</span>
+                <span v-for="(value, name) in item.dimensions" :key="name">
+                  {{ name }} {{ value }}/{{ dimensionMax[name] || 100 }}
+                </span>
               </div>
               <div class="evidence-grid">
                 <div>
@@ -517,11 +546,12 @@ onMounted(() => {
 
 <style scoped>
 .interview-layout {
-  height: 100vh;
+  min-height: 100vh;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  background: var(--color-bg);
+  background:
+    radial-gradient(circle at top, rgba(83, 74, 183, 0.14), transparent 36%),
+    var(--color-bg);
 }
 
 .interview-body {
@@ -541,21 +571,16 @@ onMounted(() => {
 .question-panel,
 .result-panel,
 .report-panel {
-  background: var(--color-card);
+  background: rgba(255, 255, 255, 0.88);
   border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-sm);
+  border-radius: 24px;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.06);
+  backdrop-filter: blur(14px);
 }
 
 .setup-panel {
-  padding: 20px;
+  padding: 22px;
   margin-bottom: 16px;
-}
-
-.panel-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 
 .panel-title,
@@ -564,14 +589,17 @@ onMounted(() => {
 .report-title-row,
 .dimension-line {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
 }
 
-.panel-title h1 {
-  margin: 0 0 6px;
-  font-size: 24px;
+.panel-title h1,
+.result-panel h2,
+.report-panel h2,
+.report-panel h3,
+.report-panel h4 {
+  margin: 0;
 }
 
 .panel-title p,
@@ -581,33 +609,50 @@ onMounted(() => {
 .question-text,
 .time-text,
 .report-summary p,
-.report-panel li {
-  line-height: 1.65;
+.report-panel li,
+.turn-answer,
+.turn-meta,
+.result-panel-tip {
   color: var(--color-text-secondary);
+  line-height: 1.65;
+}
+
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .setup-form {
   margin-top: 18px;
   display: grid;
-  grid-template-columns: minmax(220px, 1.4fr) minmax(260px, 1fr) minmax(180px, 0.8fr) 140px;
+  grid-template-columns: minmax(220px, 1.5fr) minmax(260px, 1fr) minmax(180px, 0.8fr) 140px;
   gap: 14px;
   align-items: end;
 }
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(320px, 0.85fr);
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.95fr);
   gap: 16px;
 }
 
 .question-panel,
 .result-panel {
-  padding: 18px;
+  padding: 20px;
+}
+
+.session-bar-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .session-title {
+  font-size: 18px;
   font-weight: 700;
-  margin-right: 10px;
 }
 
 .session-progress {
@@ -616,71 +661,96 @@ onMounted(() => {
 }
 
 .question-box {
-  margin-top: 20px;
+  margin-top: 18px;
+  display: grid;
+  gap: 18px;
 }
 
 .question-index {
   color: var(--color-primary);
   font-weight: 700;
-  margin-bottom: 8px;
+  font-size: 14px;
 }
 
-.question-box p {
-  margin: 0 0 16px;
-  line-height: 1.7;
+.question-text {
+  margin: 0;
+  font-size: 17px;
+  color: var(--color-text);
 }
 
 .question-actions {
-  margin-top: 14px;
   display: flex;
-  gap: 10px;
+  justify-content: flex-end;
+  gap: 12px;
   flex-wrap: wrap;
 }
 
 .finished-box,
 .empty-result {
-  min-height: 220px;
+  min-height: 240px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 10px;
-  color: var(--color-text-secondary);
   text-align: center;
+  color: var(--color-text-secondary);
 }
 
-.result-panel h2,
-.report-panel h2,
-.report-panel h3,
-.report-panel h4 {
-  margin: 0;
+.result-panel {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.result-panel-header {
+  display: grid;
+  gap: 4px;
 }
 
 .turn-result {
-  padding: 12px 0;
+  padding: 14px 0;
   border-top: 1px solid var(--color-border-light);
 }
 
 .turn-result:first-of-type {
-  border-top: 0;
+  border-top: none;
+}
+
+.turn-answer {
+  margin: 10px 0 0;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(83, 74, 183, 0.06);
+  color: var(--color-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.turn-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  margin-top: 8px;
 }
 
 .report-panel {
   margin-top: 16px;
-  padding: 18px;
+  padding: 20px;
 }
 
 .report-header {
   display: grid;
-  grid-template-columns: 128px minmax(0, 1fr);
+  grid-template-columns: 132px minmax(0, 1fr);
   gap: 20px;
   align-items: start;
 }
 
 .report-score {
-  min-height: 110px;
-  border-radius: var(--radius-sm);
-  background: var(--color-primary-lighter);
+  min-height: 116px;
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(83, 74, 183, 0.16), rgba(83, 74, 183, 0.06));
   color: var(--color-primary);
   display: flex;
   flex-direction: column;
@@ -689,7 +759,7 @@ onMounted(() => {
 }
 
 .report-score strong {
-  font-size: 38px;
+  font-size: 40px;
   line-height: 1;
 }
 
@@ -703,8 +773,8 @@ onMounted(() => {
 .dimension-item,
 .analysis-card {
   border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-sm);
-  padding: 12px;
+  border-radius: 20px;
+  padding: 14px;
 }
 
 .dimension-line {
@@ -736,20 +806,28 @@ onMounted(() => {
 }
 
 .mini-dimensions span {
-  padding: 3px 8px;
-  border-radius: 4px;
-  background: var(--color-bg);
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.05);
   color: var(--color-text-secondary);
-  font-size: var(--font-xs);
+  font-size: 12px;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1200px) {
   .dimension-grid {
-    grid-template-columns: repeat(2, minmax(150px, 1fr));
+    grid-template-columns: repeat(3, minmax(150px, 1fr));
   }
 }
 
 @media (max-width: 980px) {
+  .interview-body :deep(.sidebar) {
+    display: none;
+  }
+
+  .interview-main {
+    padding: 14px;
+  }
+
   .setup-form,
   .workspace,
   .report-header,
@@ -759,13 +837,39 @@ onMounted(() => {
   }
 
   .panel-title,
-  .report-title-row {
+  .report-title-row,
+  .session-bar {
     flex-direction: column;
     align-items: stretch;
   }
 
   .dimension-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .setup-panel,
+  .question-panel,
+  .result-panel,
+  .report-panel {
+    border-radius: 18px;
+  }
+
+  .setup-panel,
+  .question-panel,
+  .result-panel,
+  .report-panel,
+  .interview-main {
+    padding-inline: 12px;
+  }
+
+  .report-score {
+    min-height: 104px;
+  }
+
+  .question-text {
+    font-size: 16px;
   }
 }
 </style>

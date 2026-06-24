@@ -958,16 +958,79 @@ onMounted(() => {
 }
 
 @media (max-width: 960px) {
+  .chat-body :deep(.sidebar) {
+    display: none;
+  }
+
+  .chat-body {
+    display: block;
+    overflow-y: auto;
+  }
+
+  .chat-main {
+    min-height: calc(100vh - 64px);
+  }
+
+  .chat-content {
+    min-height: 0;
+  }
+
   .chat-input-area {
-    margin: 0 14px 14px;
+    margin: 0 12px 12px;
+    border-radius: 20px;
   }
 
-  .artifacts-panel {
-    width: 220px;
-  }
-
+  .artifacts-panel,
   .artifact-preview-panel {
-    width: 300px;
+    display: none;
+  }
+
+  .feature-tags-inline {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 12px;
+    padding: 0 16px;
+  }
+
+  .feature-tag-card {
+    min-width: calc(50% - 8px);
+    padding: 18px 14px;
+  }
+
+  .input-row {
+    gap: 10px;
+  }
+
+  .control-row {
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+
+  .input-tools,
+  .input-row :deep(.el-button--primary) {
+    width: 100%;
+  }
+
+  .input-tools {
+    justify-content: flex-start;
+  }
+
+  .input-row :deep(.el-button--primary) {
+    min-height: 38px;
+  }
+
+  .pending-file-name {
+    max-width: 120px;
+  }
+}
+
+@media (max-width: 640px) {
+  .message-list {
+    padding-top: 14px;
+  }
+
+  .feature-tag-card {
+    min-width: 100%;
   }
 }
 

@@ -8,13 +8,14 @@ export interface InterviewSessionCreateParams {
   interview_type: 'technical' | 'behavioral' | 'comprehensive'
   difficulty: 'easy' | 'medium' | 'hard'
   question_count: number
-  answer_mode: 'text' | 'audio'
+  answer_mode: 'text' | 'audio' | 'mixed'
 }
 
 export interface InterviewAnswerParams {
-  answer_text: string
+  answer_text?: string
   answer_duration_seconds?: number
   answer_audio_url?: string
+  recording_id?: number
 }
 
 export interface InterviewTurn {
@@ -22,6 +23,7 @@ export interface InterviewTurn {
   question_index: number
   question: string
   answer_text?: string | null
+  answer_audio_url?: string | null
   answer_duration_seconds?: number | null
   score?: number | null
   feedback?: string | null

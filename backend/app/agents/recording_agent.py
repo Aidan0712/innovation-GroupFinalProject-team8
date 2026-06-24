@@ -99,6 +99,8 @@ class RecordingAgent(BaseAgent):
 
     def __init__(self):
         super().__init__(name="recording_agent")
+        if not settings.DASHSCOPE_API_KEY.strip():
+            raise RuntimeError("DASHSCOPE_API_KEY 未配置，录音转写功能不可用")
         self._headers = {
             "Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}",
             "Content-Type": "application/json",
@@ -374,6 +376,15 @@ class RecordingAgent(BaseAgent):
         Returns:
             dict: 分析结果
         """
+        char_count = len(transcript.replace(" ", "").replace("\n", ""))
+        speech_rate = round(char_count / (duration_seconds / 60)) if duration_seconds > 0 else 0
+
+        if not settings.LLM_API_KEY.strip():
+            return {
+                "analysis_text": "未配置 LLM_API_KEY，当前仅完成录音转写，暂无法生成 AI 分析报告。",
+                "speech_rate": speech_rate,
+            }
+
         from app.services.llm_service import LLMService
 
         llm = LLMService()

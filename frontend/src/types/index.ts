@@ -189,26 +189,23 @@ export interface Recording {
   user_id: number
   file_name: string
   file_url: string
-  duration: number
-  file_size: number
-  status: 'pending' | 'processing' | 'completed' | 'failed'
+  duration_seconds?: number | null
+  transcript?: string | null
+  analysis_result?: Record<string, any> | null
+  status: string
   created_at: string
 }
 
 /** 录音分析结果 */
 export interface RecordingResult {
-  id: number
   recording_id: number
-  transcription: string
-  analysis: {
-    fluency: number
-    clarity: number
-    logic: number
-    emotion: string
-    keywords: string[]
-  }
-  suggestions: string[]
-  summary: string
+  transcript?: string | null
+  duration_seconds: number
+  fluency_score?: number | null
+  speech_rate?: number | null
+  key_points?: string[]
+  suggestions?: string[]
+  collected_questions?: Array<Record<string, any>> | null
 }
 
 // ==================== 面试题相关 ====================
